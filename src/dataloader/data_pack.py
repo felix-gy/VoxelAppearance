@@ -213,7 +213,7 @@ class CameraCreator:
                 tensor = tensor * mask + int(self.alpha_is_white) * (1 - mask)
 
         # Conver mask to tensor if there is
-        if mask is not None:
+        if mask is not None and not isinstance(mask, torch.Tensor):
             size = tensor.shape[-2:][::-1]
             if mask.size != size:
                 mask = mask.resize(size)
@@ -221,7 +221,6 @@ class CameraCreator:
             if len(mask.shape) == 3:
                 mask = mask.mean(-1)
             mask = mask[None]
-
         return Camera(
             w2c=w2c,
             fovx=fovx, fovy=fovy,
