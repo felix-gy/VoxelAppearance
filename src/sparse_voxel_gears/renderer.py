@@ -10,7 +10,7 @@ import torch
 import svraster_cuda
 
 from src.utils.image_utils import resize_rendering
-
+from src.utils.ide_utils import generate_ide_fn_pytorch
 class SVRenderer:
 
     def freeze_vox_geo(self):
@@ -58,23 +58,47 @@ class SVRenderer:
             )
 
         # Compute voxel colors
-        if color_mode is None or color_mode == "sh":
+
+        if color_mode is None:
+            color_mode = "ref"
+        ####
+        if color_mode == "sh":
             active_sh_degree = self.active_sh_degree
             color_mode = "sh"
         elif color_mode.startswith("sh"):
             active_sh_degree = int(color_mode[2])
             color_mode = "sh"
 
-        if color_mode == "sh":
-            rgbs = svraster_cuda.renderer.SH_eval.apply(
-                active_sh_degree,
-                idx,
-                self.vox_center,
-                cam_pos,
-                viewdir, # Ignore above two when viewdir is not None
-                self.sh0,
-                self.shs,
-            )
+        if color_mode == "ref":
+            # 2. Calcular la normal analítica de cada vóxel visible [M, 3]
+            nx = (geos[:, [4, 5, 6, 7]].sum(1) - geos[:, [0, 1, 2, 3]].sum(1))
+            ny = (geos[:, [2, 3, 6, 7]].sum(1) - geos[:, [0, 1, 4, 5]].sum(1))
+            nz = (geos[:, [1, 3, 5, 7]].sum(1) - geos[:, [0, 2, 4, 6]].sum(1))
+            n = torch.stack([nx, ny, nz], dim=-1)
+            n = n / (torch.norm(n, dim=-1, keepdim=True) + 1e-8)
+
+            # 3. Vector de visión de la cámara hacia el vóxel
+            v = cam_pos - self.vox_center[idx]
+            v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-8)
+
+            # 4. Rayo reflejado r = 2(n · v)n - v
+            dot = (n * v).sum(dim=-1, keepdim=True)
+            r = 2 * dot * n - v
+
+            # 5. Evaluar Integrated Directional Encoding (IDE) con la rugosidad
+            ide_features = self._ide_fn(r, self.roughness[idx])
+
+            # 6. Evaluar componente especular con un Tiny MLP o Environment Map
+            dot = n*v
+            c_specular = self._specular_mlp(ide_features, self._bottleneck[idx], dot)
+
+            # 7. Componer color por vóxel: Difuso + Tinte * Especular
+            rgbs_active = self.albedo[idx] + self.specular_tint[idx] * c_specular
+
+            # Asignar al tensor global rgbs [N, 3]
+            rgbs = torch.zeros([self.num_voxels, 3], device="cuda")
+            rgbs[idx] = rgbs_active
+
         elif color_mode == "rand":
             rgbs = torch.rand([self.num_voxels, 3], dtype=torch.float32, device="cuda")
         elif color_mode == "dontcare":

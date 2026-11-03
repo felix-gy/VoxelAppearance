@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import svraster_cuda
 
-from src.utils.activation_utils import rgb2shzero
+from src.utils.activation_utils import rgb2shzero, softplus_inverse
 from src.utils import octree_utils
 
 class SVConstructor:
@@ -84,6 +84,18 @@ class SVConstructor:
         self._subdiv_p = torch.ones(
             [self.num_voxels, 1],
             dtype=torch.float32, device="cuda").requires_grad_()
+
+        # REF
+        self._albedo = torch.zeros([self.num_voxels, 3], device="cuda").requires_grad_()
+        init_tint = torch.full([self.num_voxels, 3], torch.logit(torch.tensor(0.04)), device="cuda")
+        self._specular_tint = init_tint.requires_grad_()
+        self._roughness = torch.full(
+            [self.num_voxels, 1], softplus_inverse(torch.tensor(0.3)), device="cuda"
+        ).requires_grad_()
+        self._bottleneck = torch.randn([self.num_voxels, 8], device="cuda").mul_(0.01).requires_grad_()
+
+        #####################
+
 
     def octpath_init(self,
                   scene_center,
