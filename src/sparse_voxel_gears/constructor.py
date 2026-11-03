@@ -10,7 +10,6 @@ import torch
 import numpy as np
 import svraster_cuda
 
-from src.utils.activation_utils import rgb2shzero, softplus_inverse
 from src.utils import octree_utils
 
 class SVConstructor:
@@ -20,10 +19,10 @@ class SVConstructor:
                    outside_level,      # Number of Octree levels for background
                    init_n_level=6,     # Starting from (2^init_n_level)^3 voxels
                    init_out_ratio=2.0, # Number of voxel ratio for outside (background region)
-                   sh_degree_init=3,   # Initial activated sh degree
                    geo_init=-10.0,     # Init pre-activation density
-                   sh0_init=0.5,       # Init voxel colors in range [0,1]
-                   shs_init=0.0,       # Init coefficients of higher-degree sh
+                   albedo_init=0.5,
+                   specular_tint_init=0.04,
+                   roughness_init=0.3,
                    cameras=None,       # Cameras that helps voxel allocation
                    ):
 
@@ -48,8 +47,8 @@ class SVConstructor:
 
         if outside_level == 0:
             # Object centric bounded scenes
-            ou_path = torch.empty([0, 1], dtype=in_path.dtype, device="cuda")
-            ou_level = torch.empty([0, 1], dtype=in_level.dtype, device="cuda")
+            ou_path = torch.empty([0, 1], dtype=in_path.dtype, device=in_path.device)
+            ou_level = torch.empty([0, 1], dtype=in_level.dtype, device=in_level.device)
         else:
             min_num = len(in_path) * init_out_ratio
             max_level = outside_level + init_n_level
@@ -65,37 +64,14 @@ class SVConstructor:
         self.octpath = torch.cat([ou_path, in_path])
         self.octlevel = torch.cat([ou_level, in_level])
 
-        self.active_sh_degree = min(sh_degree_init, self.max_sh_degree)
-
-        # Init trainable parameters
+        self._invalidate_voxel_cache()
+        device = self.octpath.device
         self._geo_grid_pts = torch.full(
             [self.num_grid_pts, 1], geo_init,
-            dtype=torch.float32, device="cuda").requires_grad_()
-
-        self._sh0 = torch.full(
-            [self.num_voxels, 3], rgb2shzero(sh0_init),
-            dtype=torch.float32, device="cuda").requires_grad_()
-
-        self._shs = torch.full(
-            [self.num_voxels, (self.max_sh_degree+1)**2 - 1, 3], shs_init,
-            dtype=torch.float32, device="cuda").requires_grad_()
-
-        # Subdivision priority trackor
+            dtype=torch.float32, device=device).requires_grad_()
         self._subdiv_p = torch.ones(
-            [self.num_voxels, 1],
-            dtype=torch.float32, device="cuda").requires_grad_()
-
-        # REF
-        self._albedo = torch.zeros([self.num_voxels, 3], device="cuda").requires_grad_()
-        init_tint = torch.full([self.num_voxels, 3], torch.logit(torch.tensor(0.04)), device="cuda")
-        self._specular_tint = init_tint.requires_grad_()
-        self._roughness = torch.full(
-            [self.num_voxels, 1], softplus_inverse(torch.tensor(0.3)), device="cuda"
-        ).requires_grad_()
-        self._bottleneck = torch.randn([self.num_voxels, 8], device="cuda").mul_(0.01).requires_grad_()
-
-        #####################
-
+            [self.num_voxels, 1], dtype=torch.float32, device=device).requires_grad_()
+        self._init_appearance(albedo_init, specular_tint_init, roughness_init)
 
     def octpath_init(self,
                   scene_center,
@@ -107,67 +83,51 @@ class SVConstructor:
                   # If the input are tensors, the gradient of rendering can be backprop to them.
                   # Otherwise, it creates new trainable tensors.
                   rgb=0.5,       # Nx3 or scalar for voxel color in range of 0~1.
-                  shs=0.0,       # NxDx3 or scalar for voxel higher-deg sh coefficient.
                   density=-10.,  # Nx8 or Ngridx1 or scalar for voxel density field.
                                  # The order is [0,0,0] => [0,0,1] => [0,1,0] => [0,1,1] ...
                   reduce_density=False,  # Whether to merge grid points if density is Nx8.
                   ):
 
         self.scene_center, self.scene_extent, self.inside_extent = get_scene_bound_tensor(
-            center=scene_center, extent=scene_extent)
+            center=scene_center, extent=scene_extent, device=octpath.device)
 
         assert torch.is_tensor(octpath)
-        octlevel = get_octlevel_tensor(octlevel, num_voxels=len(octpath))
+        octlevel = get_octlevel_tensor(octlevel, num_voxels=len(octpath), device=octpath.device)
 
         self.octpath = octpath.view(-1, 1).contiguous()
         self.octlevel = octlevel.view(-1, 1).contiguous()
         assert len(self.octpath) == len(self.octlevel)
 
-        # Subdivision priority trackor
+        self._invalidate_voxel_cache()
+        device = self.octpath.device
         self._subdiv_p = torch.ones(
-            [self.num_voxels, 1],
-            dtype=torch.float32, device="cuda").requires_grad_()
+            [self.num_voxels, 1], dtype=torch.float32, device=device).requires_grad_()
+        self._init_appearance(rgb)
 
-        # Setup appearence parameters
-        if torch.is_tensor(rgb):
-            assert rgb.shape == (self.num_voxels, 3)
-            self._sh0 = rgb2shzero(rgb.contiguous().cuda())
-        else:
-            self._sh0 = torch.full(
-                [self.num_voxels, 3], rgb2shzero(rgb),
-                dtype=torch.float32, device="cuda").requires_grad_()
-
-        if torch.is_tensor(shs):
-            assert shs.shape == (self.num_voxels, (self.max_sh_degree+1)**2 - 1, 3)
-            self.shs = shs.contiguous().cuda()
-        else:
-            self._shs = torch.full(
-                [self.num_voxels, (self.max_sh_degree+1)**2 - 1, 3], shs,
-                dtype=torch.float32, device="cuda").requires_grad_()
-
-        # Setup geometry parameters
+        # Setup geometry parameters. Unshared corner inputs remain available
+        # through frozen_vox_geo, preserving their connection to autograd.
         if torch.is_tensor(density):
+            density = density.to(device=device, dtype=torch.float32).contiguous()
             if density.shape == (self.num_grid_pts, 1):
-                self._geo_grid_pts = density.contiguous().cuda()
+                self._geo_grid_pts = density
             elif density.shape == (self.num_voxels, 8):
                 if reduce_density:
                     self._geo_grid_pts = torch.zeros(
-                        [self.num_grid_pts, 1], dtype=torch.float32, device="cuda")
+                        [self.num_grid_pts, 1], dtype=torch.float32, device=device)
                     self._geo_grid_pts.index_reduce_(
-                        dim=0,
-                        index=self.vox_key.flatten(),
-                        source=density.flatten(),
-                        reduce="mean",
-                        include_self=False)
+                        dim=0, index=self.vox_key.flatten(),
+                        source=density.reshape(-1, 1), reduce="mean", include_self=False)
                 else:
-                    self.frozen_vox_geo = density.contiguous().cuda()
+                    self._geo_grid_pts = None
+                    self.frozen_vox_geo = density
             else:
-                raise Exception(f"Unexpected density shape. "
-                                f"It should be either {(self.num_grid_pts,1)} or {(self.num_voxels,8)}")
+                raise ValueError(
+                    f"density must have shape {(self.num_grid_pts, 1)} "
+                    f"or {(self.num_voxels, 8)}")
         else:
             self._geo_grid_pts = torch.full(
                 [self.num_grid_pts, 1], density,
-                dtype=torch.float32, device="cuda").requires_grad_()
+                dtype=torch.float32, device=device).requires_grad_()
 
     def ijkl_init(self,
                   scene_center,
@@ -179,17 +139,16 @@ class SVConstructor:
                   # If the input are tensors, the gradient of rendering can be backprop to them.
                   # Otherwise, it creates new trainable tensors.
                   rgb=0.5,       # Nx3 or scalar for voxel color in range of 0~1.
-                  shs=0.0,       # NxDx3 or scalar for voxel higher-deg sh coefficient.
                   density=-10.,  # Nx8 or Ngridx1 or scalar for voxel density field.
                                  # The order is [0,0,0] => [0,0,1] => [0,1,0] => [0,1,1] ...
                   reduce_density=False,  # Whether to merge grid points if density is Nx8.
                   ):
 
         scene_center, scene_extent, _ = get_scene_bound_tensor(
-            center=scene_center, extent=scene_extent)
+            center=scene_center, extent=scene_extent, device=ijk.device)
 
         # Convert to ijkl to octpath
-        octlevel = get_octlevel_tensor(octlevel, num_voxels=len(ijk))
+        octlevel = get_octlevel_tensor(octlevel, num_voxels=len(ijk), device=ijk.device)
 
         assert torch.is_tensor(ijk)
         assert len(ijk.shape) == 2 and ijk.shape[1] == 3
@@ -207,7 +166,6 @@ class SVConstructor:
             octpath=octpath,
             octlevel=octlevel,
             rgb=rgb,
-            shs=shs,
             density=density,
             reduce_density=reduce_density)
 
@@ -223,18 +181,17 @@ class SVConstructor:
                          # If the input are tensors, the gradient of rendering can be backprop to them.
                          # Otherwise, it creates new trainable tensors.
                          rgb=0.5,       # Nx3 or scalar for voxel color in range of 0~1.
-                         shs=0.0,       # NxDx3 or scalar for voxel higher-deg sh coefficient.
-                         density=-10.,  # Nx8 or scalar for voxel density field.
+                                density=-10.,  # Nx8 or scalar for voxel density field.
                                         # The order is [0,0,0] => [0,0,1] => [0,1,0] => [0,1,1] ...
                          reduce_density=False,  # Whether to merge grid points if density is Nx8.
                          ):
 
-        scene_center, scene_extent, _ = get_scene_bound_tensor(center=scene_center, extent=scene_extent)
+        scene_center, scene_extent, _ = get_scene_bound_tensor(center=scene_center, extent=scene_extent, device=xyz.device)
 
         # Compute voxel level
         if octlevel is not None:
             assert expected_vox_size is None
-            octlevel = get_octlevel_tensor(octlevel, num_voxels=len(xyz))
+            octlevel = get_octlevel_tensor(octlevel, num_voxels=len(xyz), device=xyz.device)
         elif expected_vox_size is not None:
             octlevel_fp32 = octree_utils.vox_size_2_level(scene_extent, expected_vox_size)
             if level_round_mode == "nearest":
@@ -246,7 +203,7 @@ class SVConstructor:
             else:
                 raise Exception("Unknonw level_round_mode")
             octlevel_fp32 = octlevel_fp32.clamp(1, svraster_cuda.meta.MAX_NUM_LEVELS)
-            octlevel = get_octlevel_tensor(octlevel_fp32.to(torch.int8), num_voxels=len(xyz))
+            octlevel = get_octlevel_tensor(octlevel_fp32.to(torch.int8), num_voxels=len(xyz), device=xyz.device)
         else:
             raise Exception("Either octlevel or expected_vox_size should be given.")
 
@@ -264,30 +221,20 @@ class SVConstructor:
         if torch.is_tensor(rgb):
             assert rgb.shape == (len(invmap), 3)
             new_shape = (len(ijk), 3)
-            rgb = torch.zeros(new_shape, dtype=torch.float32, device="cuda").index_reduce_(
+            rgb = torch.zeros(new_shape, dtype=torch.float32, device=xyz.device).index_reduce_(
                 dim=0,
                 index=invmap,
-                source=rgb,
-                reduce="mean",
-                include_self=False)
-
-        if torch.is_tensor(shs):
-            assert shs.shape == (len(invmap), (self.max_sh_degree+1)**2 - 1, 3)
-            new_shape = (len(ijk), (self.max_sh_degree+1)**2 - 1, 3)
-            shs = torch.zeros(new_shape, dtype=torch.float32, device="cuda").index_reduce_(
-                dim=0,
-                index=invmap,
-                source=shs,
+                source=rgb.to(device=xyz.device, dtype=torch.float32),
                 reduce="mean",
                 include_self=False)
 
         if torch.is_tensor(density):
             assert density.shape == (len(invmap), 8)
             new_shape = (len(ijk), 8)
-            density = torch.zeros(new_shape, dtype=torch.float32, device="cuda").index_reduce_(
+            density = torch.zeros(new_shape, dtype=torch.float32, device=xyz.device).index_reduce_(
                 dim=0,
                 index=invmap,
-                source=density,
+                source=density.to(device=xyz.device, dtype=torch.float32),
                 reduce="mean",
                 include_self=False)
 
@@ -298,7 +245,6 @@ class SVConstructor:
             ijk=ijk,
             octlevel=octlevel,
             rgb=rgb,
-            shs=shs,
             density=density,
             reduce_density=reduce_density)
 
@@ -306,35 +252,28 @@ class SVConstructor:
 #################################################
 # Helper function
 #################################################
-def get_scene_bound_tensor(center, extent, outside_level=0):
-    if torch.is_tensor(center):
-        scene_center = center.float().clone().cuda()
-    else:
-        scene_center = torch.tensor(center, dtype=torch.float32, device="cuda")
-
-    if torch.is_tensor(extent):
-        inside_extent = extent.float().clone().cuda()
-    else:
-        inside_extent = torch.tensor(extent, dtype=torch.float32, device="cuda")
-
+def get_scene_bound_tensor(center, extent, outside_level=0, device=None):
+    if device is None:
+        device = center.device if torch.is_tensor(center) else "cuda"
+    scene_center = torch.as_tensor(center, dtype=torch.float32, device=device).clone()
+    inside_extent = torch.as_tensor(extent, dtype=torch.float32, device=device).clone()
     scene_extent = inside_extent * (2 ** outside_level)
-
     assert scene_center.shape == (3,)
     assert scene_extent.numel() == 1
-
     return scene_center, scene_extent, inside_extent
 
-def get_octlevel_tensor(octlevel, num_voxels=None):
-    if not torch.is_tensor(octlevel):
-        assert np.all(octlevel > 0)
-        assert np.all(octlevel <= svraster_cuda.meta.MAX_NUM_LEVELS)
-        octlevel = torch.tensor(octlevel, dtype=torch.int8, device="cuda")
-    if octlevel.numel() == 1:
-        octlevel = octlevel.view(1, 1).repeat(num_voxels, 1).contiguous()
-    octlevel = octlevel.reshape(-1, 1)
-    assert octlevel.dtype == torch.int8
-    assert num_voxels is None or octlevel.numel() == num_voxels
 
+def get_octlevel_tensor(octlevel, num_voxels=None, device=None):
+    if device is None:
+        device = octlevel.device if torch.is_tensor(octlevel) else "cuda"
+    octlevel = torch.as_tensor(octlevel, device=device)
+    assert ((octlevel > 0) & (octlevel <= svraster_cuda.meta.MAX_NUM_LEVELS) &
+            (octlevel == octlevel.long())).all()
+    octlevel = octlevel.to(torch.int8)
+    if octlevel.numel() == 1:
+        octlevel = octlevel.view(1, 1).repeat(num_voxels, 1)
+    octlevel = octlevel.reshape(-1, 1).contiguous()
+    assert num_voxels is None or octlevel.numel() == num_voxels
     return octlevel
 
 

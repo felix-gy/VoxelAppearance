@@ -14,6 +14,10 @@ We propose an efficient radiance field rendering algorithm that incorporates a r
 - Mar 18, 2025: Revise literature review. Support depthanythingv2 relative depth loss and mast3r metric depth loss for a better geometry.
 - Mar 8, 2025: Support ScanNet++ dataset. Check the [benchmark](https://kaldir.vc.in.tum.de/scannetpp/benchmark/nvs) for our results on the 3rd-party hidden set evaluation. Our [short article](./articles/scannetpp_dataset.md) may be helpful if you want to work on scannet or indoor environement.
 
+This fork uses REF appearance (per-voxel albedo, tint, roughness and latent
+features plus a shared specular MLP) instead of per-voxel SH coefficients.
+See [REF integration and checkpoint migration](./articles/ref_appearance.md).
+
 ## Install
 1. Install Pytorch first. The tested versions are `1.13.1+cu117` and `2.5.0+cu124`.
 2. May need to install cuda-toolkit for your virtual environment that is aligned with the installed pytorch:

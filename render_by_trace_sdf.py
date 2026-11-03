@@ -41,8 +41,6 @@ def render_set(name, iteration, suffix, args, views, voxel_model):
     makedirs(render_path, exist_ok=True)
     print(f'render_path: {render_path}')
     print(f'ss            =: {voxel_model.ss}')
-    print(f'vox_geo_mode  =: {voxel_model.vox_geo_mode}')
-    print(f'density_mode  =: {voxel_model.density_mode}')
 
     if args.eval_fps:
         torch.cuda.empty_cache()
@@ -57,8 +55,12 @@ def render_set(name, iteration, suffix, args, views, voxel_model):
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         hit_depth, hit_vox_id = voxel_model.render_trace_sdf(view)
         if not args.eval_fps:
-            rendering = voxel_model._sh0[hit_vox_id].moveaxis(-1, 0)
-            rendering *= (hit_vox_id != -1)
+            visible = hit_vox_id >= 0
+            idx = hit_vox_id[visible].unique()
+            colors = voxel_model.vox_fn(idx, view.position)['rgbs']
+            rendering = colors.new_zeros((*hit_vox_id.shape, 3))
+            rendering[visible] = colors[hit_vox_id[visible]]
+            rendering = rendering.moveaxis(-1, 0)
             gt = view.image.cuda()
             mse = (rendering.clip(0,1) - gt.clip(0,1)).square().mean()
             psnr = -10 * torch.log10(mse)
@@ -113,11 +115,20 @@ if __name__ == "__main__":
         cfg.data.res_width = 0
 
     # Load data
-    data_pack = DataPack(cfg.data, cfg.model.white_background, camera_params_only=False)
+    data_pack = DataPack(
+        source_path=cfg.data.source_path, image_dir_name=cfg.data.image_dir_name,
+        res_downscale=cfg.data.res_downscale, res_width=cfg.data.res_width,
+        skip_blend_alpha=cfg.data.skip_blend_alpha, alpha_is_white=cfg.model.white_background,
+        data_device=cfg.data.data_device, use_test=cfg.data.eval,
+        test_every=cfg.data.test_every, camera_params_only=False)
 
     # Load model
-    voxel_model = SparseVoxelModel(cfg.model)
+    voxel_model = SparseVoxelModel(**cfg.model)
     loaded_iter = voxel_model.load_iteration(args.model_path, args.iteration)
+    if not hasattr(voxel_model, 'render_trace_sdf'):
+        raise RuntimeError(
+            "This legacy script requires an SDF tracing backend, which is not "
+            "provided by the current rasterizer. Use render.py for REF rendering.")
 
     # Output path suffix
     suffix = args.suffix
@@ -151,12 +162,11 @@ if __name__ == "__main__":
         feat_dim=3)
 
     for cam in tqdm(data_pack.get_train_cameras()):
-        median_depth, median_idx = voxel_model.render_median(cam)
+        median_depth = voxel_model.render(cam, output_depth=True)['depth'][[2]]
         volume.integrate(cam=cam, feat=cam.image.cuda(), depth=median_depth)
 
-    voxel_model._shs.data.fill_(0)
-    voxel_model._sh0.data.copy_(
-        volume.feature.nan_to_num_()[voxel_model.vox_key].mean(dim=1))
+    fused_rgb = volume.feature.nan_to_num_(0.5)[voxel_model.vox_key].mean(dim=1)
+    voxel_model._albedo.data.copy_(torch.logit(fused_rgb.clamp(1e-6, 1 - 1e-6)))
     voxel_model._geo_grid_pts.data.copy_(
         volume.tsdf.nan_to_num_())
 

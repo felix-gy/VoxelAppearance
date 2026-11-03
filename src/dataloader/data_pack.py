@@ -204,23 +204,22 @@ class CameraCreator:
             size = (round(image.size[0] / downscale), round(image.size[1] / downscale))
             image = image.resize(size)
 
-        # Convert image to tensor
+        # External masks are PIL images; resize and normalize them before any
+        # alpha extraction, which produces an already-normalized torch tensor.
+        if mask is not None:
+            if mask.size != image.size:
+                mask = mask.resize(image.size)
+            mask = torch.tensor(np.array(mask), dtype=torch.float32) / 255.0
+            if mask.ndim == 3:
+                mask = mask.mean(-1)
+            mask = mask.unsqueeze(0)
+
         tensor = torch.tensor(np.array(image), dtype=torch.float32).moveaxis(-1, 0) / 255.0
         if tensor.shape[0] == 4:
-            # Blend alpha channel
-            tensor, mask = tensor.split([3, 1], dim=0)
+            tensor, alpha = tensor.split([3, 1], dim=0)
             if not self.skip_blend_alpha:
-                tensor = tensor * mask + int(self.alpha_is_white) * (1 - mask)
-
-        # Conver mask to tensor if there is
-        if mask is not None:
-            size = tensor.shape[-2:][::-1]
-            if mask.size != size:
-                mask = mask.resize(size)
-            mask = torch.tensor(np.array(mask), dtype=torch.float32) / 255.0
-            if len(mask.shape) == 3:
-                mask = mask.mean(-1)
-            mask = mask[None]
+                tensor = tensor * alpha + int(self.alpha_is_white) * (1 - alpha)
+            mask = alpha if mask is None else mask * alpha
 
         return Camera(
             w2c=w2c,

@@ -87,7 +87,7 @@ def extract_mesh_progressive(args, data_pack, voxel_model, init_lv, final_lv, cr
         inside_max = torch.tensor(crop_bbox[1], dtype=torch.float32, device="cuda")
 
     # Initialize a dense grid
-    vol = SparseVoxelModel(sh_degree=0)
+    vol = SparseVoxelModel()
     vol.model_init(
         bounding=torch.stack([inside_min, inside_max]),
         outside_level=0,
@@ -164,7 +164,7 @@ def extract_mesh(args, data_pack, voxel_model, final_lv, crop_bbox, iso=0):
     octpath, octlevel = octree_utils.clamp_level(voxel_model.octpath, voxel_model.octlevel, target_lv)
 
     # Initialize from clamped adaptive sparse voxels
-    vol = SparseVoxelModel(sh_degree=0)
+    vol = SparseVoxelModel()
     vol.octpath_init(
         voxel_model.scene_center,
         voxel_model.scene_extent,
@@ -234,7 +234,7 @@ def colorize_pts(args, pts, data_pack):
 
     for cam in tqdm(cam_lst):
 
-        render_pkg = voxel_model.render(cam, color_mode="sh0", output_depth=True, output_T=True)
+        render_pkg = voxel_model.render(cam, color_mode="albedo", output_depth=True, output_T=True)
         frame_color = render_pkg['color']
         if args.use_mean:
             frame_depth = render_pkg['raw_depth'][[0]]  # Use mean depth
@@ -348,13 +348,7 @@ if __name__ == "__main__":
     )
 
     # Load model
-    voxel_model = SparseVoxelModel(
-        n_samp_per_vox=cfg.model.n_samp_per_vox,
-        sh_degree=cfg.model.sh_degree,
-        ss=cfg.model.ss,
-        white_background=cfg.model.white_background,
-        black_background=cfg.model.black_background,
-    )
+    voxel_model = SparseVoxelModel(**cfg.model)
     voxel_model.load_iteration(args.model_path, args.iteration)
     voxel_model.freeze_vox_geo()
 

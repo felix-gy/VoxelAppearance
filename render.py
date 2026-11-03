@@ -164,13 +164,7 @@ if __name__ == "__main__":
     )
 
     # Load model
-    voxel_model = SparseVoxelModel(
-        n_samp_per_vox=cfg.model.n_samp_per_vox,
-        sh_degree=cfg.model.sh_degree,
-        ss=cfg.model.ss,
-        white_background=cfg.model.white_background,
-        black_background=cfg.model.black_background,
-    )
+    voxel_model = SparseVoxelModel(**cfg.model)
     loaded_iter = voxel_model.load_iteration(args.model_path, args.iteration)
 
     # Output path suffix

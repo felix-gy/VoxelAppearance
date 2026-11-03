@@ -7,30 +7,36 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import torch
+import torch.nn.functional as F
 import svraster_cuda
 
 from src.utils.image_utils import resize_rendering
-from src.utils.ide_utils import generate_ide_fn_pytorch
+
 class SVRenderer:
 
     def freeze_vox_geo(self):
         '''
         Freeze grid points parameter and pre-gather them to each voxel.
         '''
+        if hasattr(self, 'frozen_vox_geo'):
+            return
         with torch.no_grad():
             self.frozen_vox_geo = svraster_cuda.renderer.GatherGeoParams.apply(
                 self.vox_key,
-                torch.arange(self.num_voxels, device="cuda"),
+                torch.arange(self.num_voxels, device=self.octpath.device),
                 self._geo_grid_pts
             )
-        self._geo_grid_pts.requires_grad = False
 
     def unfreeze_vox_geo(self):
         '''
         Unfreeze grid points parameter.
         '''
+        if self._geo_grid_pts is None:
+            from src.sparse_voxel_gears.adaptive import agg_voxel_into_grid_pts
+            self._geo_grid_pts = agg_voxel_into_grid_pts(
+                self.num_grid_pts, self.vox_key,
+                self.frozen_vox_geo.unsqueeze(-1)).requires_grad_()
         del self.frozen_vox_geo
-        self._geo_grid_pts.requires_grad = True
 
     def vox_fn(self, idx, cam_pos, color_mode=None, viewdir=None):
         '''
@@ -57,54 +63,22 @@ class SVRenderer:
                 self._geo_grid_pts
             )
 
-        # Compute voxel colors
-
-        if color_mode is None:
-            color_mode = "ref"
-        ####
-        if color_mode == "sh":
-            active_sh_degree = self.active_sh_degree
-            color_mode = "sh"
-        elif color_mode.startswith("sh"):
-            active_sh_degree = int(color_mode[2])
-            color_mode = "sh"
-
+        color_mode = "ref" if color_mode is None else color_mode
         if color_mode == "ref":
-            # 2. Calcular la normal analítica de cada vóxel visible [M, 3]
-            nx = (geos[:, [4, 5, 6, 7]].sum(1) - geos[:, [0, 1, 2, 3]].sum(1))
-            ny = (geos[:, [2, 3, 6, 7]].sum(1) - geos[:, [0, 1, 4, 5]].sum(1))
-            nz = (geos[:, [1, 3, 5, 7]].sum(1) - geos[:, [0, 2, 4, 6]].sum(1))
-            n = torch.stack([nx, ny, nz], dim=-1)
-            n = n / (torch.norm(n, dim=-1, keepdim=True) + 1e-8)
-
-            # 3. Vector de visión de la cámara hacia el vóxel
-            v = cam_pos - self.vox_center[idx]
-            v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-8)
-
-            # 4. Rayo reflejado r = 2(n · v)n - v
-            dot = (n * v).sum(dim=-1, keepdim=True)
-            r = 2 * dot * n - v
-
-            # 5. Evaluar Integrated Directional Encoding (IDE) con la rugosidad
-            ide_features = self._ide_fn(r, self.roughness[idx])
-
-            # 6. Evaluar componente especular con un Tiny MLP o Environment Map
-            dot = n*v
-            c_specular = self._specular_mlp(ide_features, self._bottleneck[idx], dot)
-
-            # 7. Componer color por vóxel: Difuso + Tinte * Especular
-            rgbs_active = self.albedo[idx] + self.specular_tint[idx] * c_specular
-
-            # Asignar al tensor global rgbs [N, 3]
-            rgbs = torch.zeros([self.num_voxels, 3], device="cuda")
-            rgbs[idx] = rgbs_active
-
+            active_rgb = self.evaluate_color(idx, geos[idx], cam_pos, viewdir)
+            rgbs = geos.new_zeros((self.num_voxels, 3))
+            rgbs[idx] = active_rgb
+        elif color_mode == "albedo":
+            rgbs = geos.new_zeros((self.num_voxels, 3))
+            rgbs[idx] = torch.sigmoid(self._albedo[idx])
         elif color_mode == "rand":
-            rgbs = torch.rand([self.num_voxels, 3], dtype=torch.float32, device="cuda")
+            rgbs = torch.rand(self.num_voxels, 3, device=geos.device, dtype=geos.dtype)
         elif color_mode == "dontcare":
-            rgbs = torch.empty([self.num_voxels, 3], dtype=torch.float32, device="cuda")
+            rgbs = geos.new_zeros((self.num_voxels, 3))
         else:
-            raise NotImplementedError
+            raise ValueError(
+                f"Unknown color mode {color_mode!r}; use ref, albedo, rand or dontcare. "
+                "Per-voxel SH colors have been replaced by REF appearance.")
 
         # Pack everything
         vox_params = {
@@ -113,9 +87,53 @@ class SVRenderer:
             'subdiv_p': self._subdiv_p, # Dummy param to record subdivision priority
         }
         if vox_params['subdiv_p'] is None:
-            vox_params['subdiv_p'] = torch.ones([self.num_voxels, 1], device="cuda")
+            vox_params['subdiv_p'] = geos.new_ones((self.num_voxels, 1))
 
         return vox_params
+
+    def evaluate_color(self, idx, active_geos, cam_pos=None, viewdir=None):
+        """Shade selected voxels; active_geos is [len(idx), 8].
+
+        Optional viewdir points from camera to voxel, matching the previous
+        interface, and may be [3], [N, 3], or [len(idx), 3]. Colors are learned
+        directly in the training images' encoding; no sRGB conversion is added.
+        """
+        if active_geos.shape != (len(idx), 8):
+            raise ValueError("active_geos must have shape [len(idx), 8].")
+        if viewdir is None:
+            if cam_pos is None:
+                raise ValueError("Provide cam_pos or viewdir to evaluate color.")
+            v = cam_pos.to(active_geos) - self.vox_center[idx].to(active_geos)
+        else:
+            if viewdir.shape == (self.num_voxels, 3):
+                viewdir = viewdir[idx]
+            elif viewdir.shape not in ((3,), (len(idx), 3)):
+                raise ValueError("viewdir must have shape [3], [N, 3], or [len(idx), 3].")
+            v = -viewdir.to(active_geos).expand(len(idx), 3)
+        v_norm = torch.linalg.vector_norm(v, dim=-1, keepdim=True)
+        v = torch.where(v_norm > self.normal_eps,
+                        v / v_norm.clamp_min(self.normal_eps),
+                        v.new_tensor([0.0, 0.0, 1.0]))
+
+        # Outward normal from the negative density gradient, with x/y/z corner bits
+        # 100/010/001. Its common scale cancels under normalization.
+        g = active_geos
+        gradient = torch.stack([
+            g[:, [4, 5, 6, 7]].sum(1) - g[:, [0, 1, 2, 3]].sum(1),
+            g[:, [2, 3, 6, 7]].sum(1) - g[:, [0, 1, 4, 5]].sum(1),
+            g[:, [1, 3, 5, 7]].sum(1) - g[:, [0, 2, 4, 6]].sum(1),
+        ], dim=-1)
+        magnitude = torch.linalg.vector_norm(gradient, dim=-1, keepdim=True)
+        normal = -gradient / magnitude.clamp_min(self.normal_eps)
+        # A uniform density cell has no defined normal. Use a detached unit
+        # fallback and zero geometry gradients there instead of amplifying noise.
+        normal = torch.where(magnitude > self.normal_eps, normal, v.detach())
+        dot = (normal * v).sum(dim=-1, keepdim=True)
+        reflected = F.normalize(2 * dot * normal - v, dim=-1, eps=self.normal_eps)
+        roughness = F.softplus(self._roughness[idx]) + self.MIN_ROUGHNESS
+        ide_features = self._ide_fn(reflected, roughness)
+        specular = self._specular_mlp(ide_features, self._bottleneck[idx], dot)
+        return torch.sigmoid(self._albedo[idx]) + torch.sigmoid(self._specular_tint[idx]) * specular
 
     def render(
             self,
@@ -195,6 +213,10 @@ class SVRenderer:
             # Post process super-sampling
             if render_pkg[k] is not None and render_pkg[k].shape[-2:] != (h_src, w_src):
                 render_pkg[k] = resize_rendering(render_pkg[k], size=(h_src, w_src))
+
+        # Photometric training uses this target-resolution image so values above
+        # one can still receive a gradient. Keep display/evaluation RGB bounded.
+        render_pkg['color_unclamped'] = render_pkg['color']
 
         # Clip intensity
         render_pkg['color'] = render_pkg['color'].clamp(0, 1)

@@ -19,9 +19,6 @@ model:
 regularizer:
   lambda_T_concen: 0.1
 
-init:
-  sh_degree_init: 0
-
 procedure:
   subdivide_all_until: 1000  # Subdivide all at the first time
   subdivide_samp_thres: 0.5  # Enable smaller voxels

@@ -7,6 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import argparse
+import warnings
 from yacs.config import CfgNode
 
 
@@ -14,7 +15,10 @@ cfg = CfgNode()
 
 cfg.model = CfgNode(dict(
     n_samp_per_vox = 1,       # Number of sampled points per visited voxel
-    sh_degree = 3,            # Use 3 * (k+1)^2 params per voxels for view-dependent colors
+    ide_degree = 5,
+    hidden_dim = 64,
+    bottleneck_dim = 8,
+    normal_eps = 1e-4,
     ss = 1.5,                 # Super-sampling rates for anti-aliasing
     white_background = False, # Assum white background
     black_background = False, # Assum black background
@@ -50,8 +54,11 @@ cfg.bounding = CfgNode(dict(
 
 cfg.optimizer = CfgNode(dict(
     geo_lr = 0.025,
-    sh0_lr = 0.010,
-    shs_lr = 0.00025,
+    albedo_lr = 0.010,
+    roughness_lr = 0.001,
+    tint_lr = 0.001,
+    bottleneck_lr = 0.001,
+    specular_lr = 0.001,
 
     optim_beta1 = 0.1,
     optim_beta2 = 0.99,
@@ -133,10 +140,9 @@ cfg.regularizer = CfgNode(dict(
 cfg.init = CfgNode(dict(
     # Voxel property initialization
     geo_init = -10.0,
-    sh0_init = 0.5,
-    shs_init = 0.0,
-
-    sh_degree_init = 3,
+    albedo_init = 0.5,
+    specular_tint_init = 0.04,
+    roughness_init = 0.3,
 
     # Init main inside region by dense voxels
     init_n_level = 6,  # (2^6)^3 voxels
@@ -151,8 +157,8 @@ cfg.procedure = CfgNode(dict(
     sche_mult = 1.0,
     seed=3721,
 
-    # Reset sh
-    reset_sh_ckpt = [-1],
+    # Optional diffuse-color fusion from training cameras
+    reset_albedo_ckpt = [-1],
 
     # Adaptive general setup
     adapt_from = 1000,
@@ -198,7 +204,8 @@ def update_argparser(parser):
             if t == bool:
                 group.add_argument(f"--{key}", action='store_true' if t else 'store_false')
             elif t == list:
-                group.add_argument(f"--{key}", default=value, type=type(value[0]), nargs="*")
+                item_type = type(value[0]) if value else int
+                group.add_argument(f"--{key}", default=value, type=item_type, nargs="*")
             elif t == tuple:
                 group.add_argument(f"--{key}", default=value, type=type(value[0]), nargs=len(value))
             else:
@@ -211,6 +218,7 @@ def update_config(cfg_files, cmd_lst=[]):
         cfg_files = [cfg_files]
     for cfg_path in cfg_files:
         cfg.merge_from_file(cfg_path)
+        _migrate_legacy_sh_config()
 
     if len(cmd_lst) == 0:
         return
@@ -228,3 +236,24 @@ def update_config(cfg_files, cmd_lst=[]):
             # Check if the default values is updated
             if internal_parser.get_default(key) != arg_val:
                 cfg_subgroup[key] = arg_val
+
+
+def _migrate_legacy_sh_config():
+    """Read saved SH configurations without keeping dead options in new runs."""
+    migrated = []
+    for group, old, new in (
+            ('model', 'sh_degree', None),
+            ('optimizer', 'sh0_lr', 'albedo_lr'),
+            ('optimizer', 'shs_lr', None),
+            ('init', 'sh0_init', 'albedo_init'),
+            ('init', 'shs_init', None),
+            ('init', 'sh_degree_init', None),
+            ('procedure', 'reset_sh_ckpt', 'reset_albedo_ckpt')):
+        section = getattr(cfg, group)
+        if old in section:
+            if new is not None:
+                section[new] = section[old]
+            del section[old]
+            migrated.append(f'{group}.{old}')
+    if migrated:
+        warnings.warn('Migrated legacy SH config options: ' + ', '.join(migrated), UserWarning)

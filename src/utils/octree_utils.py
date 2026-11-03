@@ -25,7 +25,7 @@ Some notes
 subtree_shift_int64 = torch.tensor([
     [0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1],
     [1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 1, 1],
-], dtype=torch.int64, device="cuda")
+], dtype=torch.int64)
 subtree_shift = subtree_shift_int64.float()
 
 
@@ -122,7 +122,7 @@ def octpath_decoding(octpath, octlevel, scene_center, scene_extent):
     vox_size = level_2_vox_size(scene_extent, octlevel)
 
     vox_ijk = svraster_cuda.utils.octpath_2_ijk(octpath, octlevel)
-    vox_center = scene_min_xyz + (vox_ijk + 0.5) * vox_size
+    vox_center = scene_min_xyz + (vox_ijk.to(scene_center) + 0.5) * vox_size
     return vox_center, vox_size
 
 
@@ -140,7 +140,7 @@ def gen_gridpoints_coordinate(octpath, octlevel):
     vox_ijk = svraster_cuda.utils.octpath_2_ijk(octpath, octlevel)
     lv2max = (MAX_NUM_LEVELS - octlevel).long()
     base_grid_ijk = (vox_ijk << lv2max).view(-1, 1, 3)
-    gridpts = base_grid_ijk + (subtree_shift_int64 << lv2max.view(-1, 1, 1))
+    gridpts = base_grid_ijk + (subtree_shift_int64.to(octpath.device) << lv2max.view(-1, 1, 1))
     return gridpts
 
 def compute_gridpoints_xyz(gridpts, scene_center, scene_extent):
@@ -158,8 +158,8 @@ def compute_gridpoints_xyz(gridpts, scene_center, scene_extent):
     scene_min_xyz = scene_center - 0.5 * scene_extent
     finest_vox_size = level_2_vox_size(
         scene_extent,
-        torch.tensor(MAX_NUM_LEVELS, dtype=torch.int64, device="cuda"))
-    gridxyz = scene_min_xyz + gridpts * finest_vox_size
+        torch.tensor(MAX_NUM_LEVELS, dtype=torch.int64, device=scene_center.device))
+    gridxyz = scene_min_xyz + gridpts.to(scene_center) * finest_vox_size
     return gridxyz
 
 
@@ -188,7 +188,7 @@ def gen_children(octpath, octlevel):
 
     # The eight octans
     # TODO: remove sanity check
-    children = torch.arange(8, dtype=torch.int64, device="cuda")
+    children = torch.arange(8, dtype=torch.int64, device=octpath.device)
     assert not (octpath & (children << (3 * (MAX_NUM_LEVELS - octlevel)))).any()
     octpath = octpath | (children << (3 * (MAX_NUM_LEVELS - octlevel)))
 

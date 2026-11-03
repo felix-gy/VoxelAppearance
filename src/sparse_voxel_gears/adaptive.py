@@ -44,6 +44,7 @@ class SVAdaptive:
             return
 
         old_vox_key = self.vox_key.clone()
+        frozen_geo = getattr(self, 'frozen_vox_geo', None)
 
         # Prune non-trainable per-voxel attributes.
         for name in self.per_voxel_attr_lst:
@@ -68,7 +69,10 @@ class SVAdaptive:
 
         # Prune trainable grid points parameters (on voxel corners).
         for name in self.grid_pts_param_lst:
-            ori_grid_pts = getattr(self, name).detach()
+            ori_grid_pts = getattr(self, name)
+            if ori_grid_pts is None:
+                continue  # Unshared corner inputs are stored in frozen_vox_geo.
+            ori_grid_pts = ori_grid_pts.detach()
 
             # Update parameter
             ori_vox_grid_pts_val = ori_grid_pts[old_vox_key]
@@ -82,6 +86,9 @@ class SVAdaptive:
             setattr(self, name, new_param)
             del ori_grid_pts, ori_vox_grid_pts_val, new_vox_val, new_param
         torch.cuda.empty_cache()
+
+        if frozen_geo is not None:
+            self.frozen_vox_geo = mask_cat_perm(frozen_geo, kept_idx=kept_idx)
 
     @torch.no_grad()
     def subdividing(self, subdivide_mask):
@@ -102,6 +109,7 @@ class SVAdaptive:
             return
 
         old_vox_key = self.vox_key.clone()
+        frozen_geo = getattr(self, 'frozen_vox_geo', None)
 
         # Subdivide non-trainable per-voxel attributes.
         octpath, octlevel = octree_utils.gen_children(
@@ -151,7 +159,10 @@ class SVAdaptive:
 
         # Subdivide grid points parameters (on voxel corners).
         for name in self.grid_pts_param_lst:
-            ori_grid_pts = getattr(self, name).detach()
+            ori_grid_pts = getattr(self, name)
+            if ori_grid_pts is None:
+                continue
+            ori_grid_pts = ori_grid_pts.detach()
 
             # Update parameter
             # First we gather grid_pts values into each voxel first.
@@ -169,15 +180,15 @@ class SVAdaptive:
             new_param = agg_voxel_into_grid_pts(
                 self.num_grid_pts,  # It's the updated one
                 self.vox_key,
-                new_vox_val).cuda().requires_grad_()
+                new_vox_val).requires_grad_()
             setattr(self, name, new_param)
             del new_vox_val, new_param
         torch.cuda.empty_cache()
 
-    @torch.no_grad()
-    def sh_degree_add1(self):
-        if self.active_sh_degree < self.max_sh_degree:
-            self.active_sh_degree += 1
+        if frozen_geo is not None:
+            self.frozen_vox_geo = mask_cat_perm(
+                frozen_geo, kept_idx=kept_idx,
+                cat_tensor=subdivide_by_interp(frozen_geo[subdivide_idx]))
 
     @torch.no_grad()
     def compute_training_stat(self, camera_lst):

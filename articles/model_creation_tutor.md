@@ -6,6 +6,10 @@ We cover several ways to create a models, including:
 3. `points_init` to create from points. It's differentiable.
 
 
+The `rgb` argument initializes diffuse albedo. The default `color_mode="ref"`
+adds learned specular color; use `color_mode="albedo"` to render only the supplied
+RGB. See [appearance configuration](./ref_appearance.md).
+
 ## Prepare
 To depict the results in later sections, we use the following pipeline to render video circularing around the world origin.
 ```python
@@ -33,7 +37,7 @@ extent = 0.6 * traj_radius
 bounding = torch.stack([center - 0.5 * extent, center + 0.5 * extent])
 
 # Create model
-voxel_model = SparseVoxelModel(sh_degree=0, black_background=True)
+voxel_model = SparseVoxelModel(black_background=True)
 # ... described in the following sections
 
 # Render video
@@ -51,7 +55,7 @@ imageio.mimwrite("dev.mp4", video, fps=30, quality=8)
 To initialize a dense grid, we use `model_init`:
 ```python
 # Create a dense cube
-voxel_model = SparseVoxelModel(sh_degree=0, black_background=True)
+voxel_model = SparseVoxelModel(black_background=True)
 voxel_model.model_init(
     bounding=bounding,
     outside_level=0, # Number of Octree levels outside the bounding (for background).
@@ -59,9 +63,9 @@ voxel_model.model_init(
 )
 
 # Fill voxel with high density and random color for visualization
-from src.utils.activation_utils import rgb2shzero
 voxel_model._geo_grid_pts.data.fill_(100)
-voxel_model._sh0.data.copy_(rgb2shzero(torch.rand(voxel_model.num_voxels, 3)))
+voxel_model._albedo.data.copy_(torch.logit(
+    torch.rand(voxel_model.num_voxels, 3, device="cuda").clamp(1e-6, 1 - 1e-6)))
 ```
 
 https://github.com/user-attachments/assets/4e34d90c-76bd-4231-9ce1-c0655d6a1662
@@ -102,7 +106,7 @@ for y, s in enumerate(ascii_art):
 We then can create a model using voxel ijk indices:
 ```python
 # Create voxel model by voxel index
-voxel_model = SparseVoxelModel(sh_degree=0, black_background=True)
+voxel_model = SparseVoxelModel(black_background=True)
 voxel_model.ijkl_init(
     scene_center=center,
     scene_extent=extent,
@@ -121,12 +125,8 @@ voxel_model.ijkl_init(
     density=0,
 
     # Voxel color. It can also be a tensor that requires gradient.
-    # The intensity scale is 0~1. Internally, it converts to zero-deg shperical harmonic.
+    # RGB in [0, 1] initializes the diffuse albedo through inverse sigmoid.
     rgb=torch.tensor(rgb, dtype=torch.float32, device="cuda"),
-
-    # Voxel higher-deg spherical harmonic. It can also be a tensor that requires gradient.
-    # If sh_degree=0, it will be a empty tensor.
-    shs=0,
 )
 ```
 
@@ -152,7 +152,7 @@ You can directly specify the voxel levels or expected voxel sizes, which will be
 Duplicated voxels will be merged and their parameters are averaged.
 ```python
 # Create voxel model by points
-voxel_model = SparseVoxelModel(sh_degree=0, black_background=True)
+voxel_model = SparseVoxelModel(black_background=True)
 voxel_model.points_init(
     scene_center=center,
     scene_extent=extent,
@@ -174,12 +174,8 @@ voxel_model.points_init(
     density=100,
 
     # Voxel color. It can also be a tensor that requires gradient.
-    # The intensity scale is 0~1. Internally, it converts to zero-deg shperical harmonic.
+    # RGB in [0, 1] initializes the diffuse albedo through inverse sigmoid.
     rgb=torch.tensor(pt_rgb, dtype=torch.float32, device="cuda"),
-
-    # Voxel higher-deg spherical harmonic. It can also be a tensor that requires gradient.
-    # If sh_degree=0, it will be a empty tensor.
-    shs=0,
 )
 ```
 
@@ -201,7 +197,7 @@ In the following example, we crate volume overlapping cases with a green and a b
 
 
 ```python
-voxel_model = SparseVoxelModel(sh_degree=0, black_background=True)
+voxel_model = SparseVoxelModel(black_background=True)
 voxel_model.ijkl_init(
     scene_center=center + 0.25 * extent,
     scene_extent=extent,

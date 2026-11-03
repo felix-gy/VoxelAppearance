@@ -10,7 +10,6 @@ import torch
 
 from src.utils import octree_utils
 from src.utils.fuser_utils import rgb_fusion
-from src.utils.activation_utils import rgb2shzero
 
 import svraster_cuda
 
@@ -55,14 +54,6 @@ class SVProperties:
         return isin
 
     @property
-    def sh0(self):
-        return self._sh0
-
-    @property
-    def shs(self):
-        return self._shs
-
-    @property
     def subdivision_priority(self):
         return self._subdiv_p.grad
 
@@ -84,6 +75,11 @@ class SVProperties:
                 self.octpath, self.octlevel, self.scene_center, self.scene_extent)
             self._grid_pts_key, self._vox_key = octree_utils.build_grid_pts_link(self.octpath, self.octlevel)
             self._check_derived_voxel_attr_signature = signature
+
+    def _invalidate_voxel_cache(self):
+        for name in ('_check_derived_voxel_attr_signature', '_vox_size_inv_signature',
+                     '_grid_pts_xyz_signature', 'frozen_vox_geo'):
+            self.__dict__.pop(name, None)
 
     @property
     def vox_center(self):
@@ -129,9 +125,9 @@ class SVProperties:
         return self._grid_pts_xyz
 
     @torch.no_grad()
-    def reset_sh_from_cameras(self, cameras):
-        self._sh0.data.copy_(rgb2shzero(rgb_fusion(self, cameras)))
-        self._shs.data.zero_()
+    def reset_albedo_from_cameras(self, cameras):
+        rgb = rgb_fusion(self, cameras).clamp(1e-6, 1 - 1e-6)
+        self._albedo.copy_(torch.logit(rgb))
 
     def apply_tv_on_density_field(self, lambda_tv_density):
         if self._geo_grid_pts.grad is None:

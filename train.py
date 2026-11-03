@@ -10,6 +10,7 @@ import os
 import json
 import time
 import uuid
+import warnings
 import imageio
 import datetime
 import numpy as np
@@ -24,6 +25,7 @@ from src.utils.image_utils import im_tensor2np, viz_tensordepth
 from src.utils.bounding_utils import decide_main_bounding
 from src.utils import mono_utils
 from src.utils import loss_utils
+from src.utils.optimizer_utils import create_voxel_optimizer, create_specular_optimizer, create_scheduler
 
 from src.dataloader.data_pack import DataPack, compute_iter_idx
 from src.sparse_voxel_model import SparseVoxelModel
@@ -78,13 +80,7 @@ def training(args):
         suggested_bounding=data_pack.suggested_bounding)
 
     # Init voxel model
-    voxel_model = SparseVoxelModel(
-        n_samp_per_vox=cfg.model.n_samp_per_vox,
-        sh_degree=cfg.model.sh_degree,
-        ss=cfg.model.ss,
-        white_background=cfg.model.white_background,
-        black_background=cfg.model.black_background,
-    )
+    voxel_model = SparseVoxelModel(**cfg.model)
 
     if args.load_iteration:
         loaded_iter = voxel_model.load_iteration(
@@ -96,39 +92,40 @@ def training(args):
             outside_level=cfg.bounding.outside_level,
             init_n_level=cfg.init.init_n_level,
             init_out_ratio=cfg.init.init_out_ratio,
-            sh_degree_init=cfg.init.sh_degree_init,
             geo_init=cfg.init.geo_init,
-            sh0_init=cfg.init.sh0_init,
-            shs_init=cfg.init.shs_init,
+            albedo_init=cfg.init.albedo_init,
+            specular_tint_init=cfg.init.specular_tint_init,
+            roughness_init=cfg.init.roughness_init,
             cameras=tr_cams,
         )
 
-    first_iter = loaded_iter if loaded_iter else 1
+    first_iter = loaded_iter + 1 if loaded_iter else 1
     print(f"Start optmization from iters={first_iter}.")
 
     # Init optimizer
-    def create_trainer():
+    def create_trainer(completed_iterations=0):
         # The pytorch built-in `torch.optim.Adam` also works
-        optimizer = svraster_cuda.sparse_adam.SparseAdam(
-            [
-                {'params': [voxel_model._geo_grid_pts], 'lr': cfg.optimizer.geo_lr},
-                {'params': [voxel_model._sh0], 'lr': cfg.optimizer.sh0_lr},
-                {'params': [voxel_model._shs], 'lr': cfg.optimizer.shs_lr},
-            ],
-            betas=(cfg.optimizer.optim_beta1, cfg.optimizer.optim_beta2),
-            eps=cfg.optimizer.optim_eps)
+        optimizer = create_voxel_optimizer(voxel_model, cfg.optimizer)
 
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=cfg.optimizer.lr_decay_ckpt,
-            gamma=cfg.optimizer.lr_decay_mult)
+        scheduler = create_scheduler(optimizer, cfg.optimizer, completed_iterations)
         return optimizer, scheduler
 
-    optimizer, scheduler = create_trainer()
+    optimizer, scheduler = create_trainer(loaded_iter or 0)
+    specular_optimizer = create_specular_optimizer(voxel_model, cfg.optimizer)
+    specular_scheduler = create_scheduler(specular_optimizer, cfg.optimizer, loaded_iter or 0)
     if loaded_iter and args.load_optimizer:
-        optim_ckpt = torch.load(os.path.join(args.model_path, "optim.pt"))
-        optimizer.load_state_dict(optim_ckpt['optim'])
-        scheduler.load_state_dict(optim_ckpt['sched'])
+        optim_ckpt = torch.load(os.path.join(args.model_path, "optim.pt"), weights_only=False)
+        if optim_ckpt.get('format_version') == 2 and not voxel_model.loaded_legacy_sh:
+            if optim_ckpt.get('iteration') != loaded_iter:
+                raise ValueError("optim.pt belongs to a different model iteration; "
+                                 "resume its matching checkpoint or omit --load_optimizer.")
+            optimizer.load_state_dict(optim_ckpt['optim'])
+            scheduler.load_state_dict(optim_ckpt['sched'])
+            specular_optimizer.load_state_dict(optim_ckpt['specular_optim'])
+            specular_scheduler.load_state_dict(optim_ckpt['specular_sched'])
+        else:
+            warnings.warn("Legacy SH optimizer state cannot be restored for REF; "
+                          "using fresh optimizers.", UserWarning)
         del optim_ckpt
 
     # Some other initialization
@@ -174,15 +171,9 @@ def training(args):
         # Start processing time tracking of this iteration
         iter_start.record()
 
-        # Increase the degree of SH by one up to a maximum degree
-        if iteration % 1000 == 0:
-            voxel_model.sh_degree_add1()
-
-        # Recompute sh from cameras
-        if iteration in cfg.procedure.reset_sh_ckpt:
-            print("Reset sh0 from cameras.")
-            print("Reset shs to zero.")
-            voxel_model.reset_sh_from_cameras(tr_cams)
+        if iteration in cfg.procedure.reset_albedo_ckpt:
+            print("Reset albedo from cameras.")
+            voxel_model.reset_albedo_from_cameras(tr_cams)
             torch.cuda.empty_cache()
 
         # Use default super-sampling option
@@ -224,17 +215,17 @@ def training(args):
 
         # Render
         render_pkg = voxel_model.render(cam, **tr_render_opt)
-        render_image = render_pkg['color']
+        render_image = render_pkg['color_unclamped']
 
         # Loss
-        mse = loss_utils.l2_loss(render_image, gt_image)
+        mse = loss_utils.l2_loss(render_pkg['color'], gt_image)
 
         if cfg.regularizer.use_l1:
             photo_loss = loss_utils.l1_loss(render_image, gt_image)
         elif cfg.regularizer.use_huber:
             photo_loss = loss_utils.huber_loss(render_image, gt_image, cfg.regularizer.huber_thres)
         else:
-            photo_loss = mse
+            photo_loss = loss_utils.l2_loss(render_image, gt_image)
         loss = cfg.regularizer.lambda_photo * photo_loss
 
         if need_sparse_depth:
@@ -263,6 +254,7 @@ def training(args):
 
         # Backward to get gradient of current iteration
         optimizer.zero_grad(set_to_none=True)
+        specular_optimizer.zero_grad(set_to_none=True)
         loss.backward()
 
         # Total variation regularization
@@ -273,6 +265,7 @@ def training(args):
 
         # Optimizer step
         optimizer.step()
+        specular_optimizer.step()
 
         ######################################################
         # Start adaptive voxels pruning and subdividing
@@ -356,7 +349,7 @@ def training(args):
 
         if need_pruning or need_subdividing:
             # Re-create trainer for the updated parameters
-            optimizer, scheduler = create_trainer()
+            optimizer, scheduler = create_trainer(iteration - 1)
             scheduler.load_state_dict(scheduler_state)
             del scheduler_state
 
@@ -368,6 +361,7 @@ def training(args):
 
         # Update learning rate
         scheduler.step()
+        specular_scheduler.step()
 
         # End processing time tracking of this iteration
         iter_end.record()
@@ -407,7 +401,10 @@ def training(args):
                 voxel_model.save_iteration(args.model_path, iteration, quantize=args.save_quantized)
                 if args.save_optimizer:
                     torch.save(
-                        {'optim': optimizer.state_dict(), 'sched': scheduler.state_dict()},
+                        {'format_version': 2, 'iteration': iteration, 'optim': optimizer.state_dict(),
+                         'sched': scheduler.state_dict(),
+                         'specular_optim': specular_optimizer.state_dict(),
+                         'specular_sched': specular_scheduler.state_dict()},
                         os.path.join(args.model_path, "optim.pt"))
                 print(f"[SAVE] path={voxel_model.latest_save_path}")
 
@@ -586,7 +583,7 @@ if __name__ == "__main__":
     if cfg.procedure.sche_mult != 1:
         sche_mult = cfg.procedure.sche_mult
 
-        for key in ['geo_lr', 'sh0_lr', 'shs_lr']:
+        for key in ['geo_lr', 'albedo_lr', 'roughness_lr', 'tint_lr', 'bottleneck_lr', 'specular_lr']:
             cfg.optimizer[key] /= sche_mult
         cfg.optimizer.lr_decay_ckpt = [
             round(v * sche_mult) if v > 0 else v
@@ -605,9 +602,9 @@ if __name__ == "__main__":
                 'adapt_from', 'adapt_every',
                 'prune_until', 'subdivide_until', 'subdivide_all_until']:
             cfg.procedure[key] = round(cfg.procedure[key] * sche_mult)
-        cfg.procedure.reset_sh_ckpt = [
+        cfg.procedure.reset_albedo_ckpt = [
             round(v * sche_mult) if v > 0 else v
-            for v in cfg.procedure.reset_sh_ckpt]
+            for v in cfg.procedure.reset_albedo_ckpt]
 
     # Update negative iterations
     for i in range(len(args.test_iterations)):

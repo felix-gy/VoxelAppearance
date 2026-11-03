@@ -265,7 +265,7 @@ tri_table = torch.tensor([
     [ 0,  1,  9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     [ 0,  8,  3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
-], dtype=torch.long, device="cuda")
+], dtype=torch.long)
 
 
 def vert_interp(iso, p1, p2, v1, v2):
@@ -359,13 +359,13 @@ def torch_marching_cubes_voxels(unit_val, unit_xyz, iso):
     torch.cuda.empty_cache()
 
     # Determine cases
-    bases = 1 << torch.arange(8, dtype=torch.long, device="cuda")
+    bases = 1 << torch.arange(8, dtype=torch.long, device=unit_val.device)
     cube_idx = ((unit_val < iso) * bases).sum(1)
 
     # Create triangle
-    tri_idx = tri_table[cube_idx]
+    tri_idx = tri_table.to(unit_val.device)[cube_idx]
     faces_xyz = vert_lst[
-        torch.arange(n_vox, device="cuda").unsqueeze(1),
+        torch.arange(n_vox, device=unit_val.device).unsqueeze(1),
         tri_idx]
     del vert_lst, cube_idx
     torch.cuda.empty_cache()

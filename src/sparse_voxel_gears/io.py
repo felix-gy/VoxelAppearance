@@ -8,109 +8,142 @@
 
 import os
 import re
+import warnings
+
 import torch
 
-from src.utils import octree_utils
+
+APPEARANCE_PARAMS = ('_albedo', '_roughness', '_specular_tint', '_bottleneck')
+
 
 class SVInOut:
-
     def save(self, path, quantize=False):
-        '''
-        Save the necessary attributes and parameters for reproducing rendering.
-        '''
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        state_dict = {
-            'active_sh_degree': self.active_sh_degree,
-            'scene_center': self.scene_center.data.contiguous(),
-            'inside_extent': self.inside_extent.data.contiguous(),
-            'scene_extent': self.scene_extent.data.contiguous(),
-            'octpath': self.octpath.data.contiguous(),
-            'octlevel': self.octlevel.data.contiguous(),
-            '_geo_grid_pts': self._geo_grid_pts.data.contiguous(),
-            '_sh0': self._sh0.data.contiguous(),
-            '_shs': self._shs.data.contiguous(),
-        }
-
+        """Save all appearance, shared weights and geometry without per-voxel SH."""
+        os.makedirs(os.path.dirname(os.fspath(path)) or '.', exist_ok=True)
+        state_dict = dict(
+            format_version=2,
+            appearance_config=self.appearance_config,
+            render_config={name: getattr(self, name) for name in (
+                'n_samp_per_vox', 'ss', 'white_background', 'black_background')},
+            specular_mlp={k: v.detach().cpu().contiguous()
+                          for k, v in self._specular_mlp.state_dict().items()},
+            quantized=quantize,
+        )
+        for name in ('scene_center', 'inside_extent', 'scene_extent', 'octpath',
+                     'octlevel', '_geo_grid_pts', *APPEARANCE_PARAMS):
+            value = getattr(self, name)
+            state_dict[name] = None if value is None else value.detach().cpu().contiguous()
+        if self._geo_grid_pts is None:
+            state_dict['frozen_vox_geo'] = self.frozen_vox_geo.detach().cpu().contiguous()
         if quantize:
             quantize_state_dict(state_dict)
-            state_dict['quantized'] = True
-        else:
-            state_dict['quantized'] = False
-
-        for k, v in state_dict.items():
-            if torch.is_tensor(v):
-                state_dict[k] = v.cpu()
         torch.save(state_dict, path)
         self.latest_save_path = path
 
-    def load(self, path):
-        '''
-        Load the saved models.
-        '''
+    def load(self, path, device='cuda'):
+        """Restore REF checkpoints, or warm-start from legacy SH constant color.
+
+        Legacy view-dependent SH coefficients cannot be converted exactly to
+        this architecture; the explicit warning describes that loss.
+        """
+        state = torch.load(path, map_location='cpu', weights_only=False)
+        version = state.get('format_version', 1)
+        if version not in (1, 2):
+            raise ValueError(f"Unsupported model checkpoint version: {version}.")
+        if state.get('quantized', False):
+            dequantize_state_dict(state)
+        for name in ('n_samp_per_vox', 'ss', 'white_background', 'black_background'):
+            if name in state.get('render_config', {}):
+                setattr(self, name, state['render_config'][name])
+        self._invalidate_voxel_cache()
         self.loaded_path = path
-        state_dict = torch.load(path, map_location="cpu", weights_only=False)
+        for name in ('scene_center', 'inside_extent', 'scene_extent'):
+            setattr(self, name, state[name].to(device=device, dtype=torch.float32))
+        self.octpath = state['octpath'].to(device=device, dtype=torch.int64)
+        self.octlevel = state['octlevel'].to(device=device, dtype=torch.int8)
+        self._geo_grid_pts = state.get('_geo_grid_pts')
+        if self._geo_grid_pts is not None:
+            self._geo_grid_pts = self._geo_grid_pts.to(
+                device=device, dtype=torch.float32).contiguous().requires_grad_()
+            if self._geo_grid_pts.shape != (self.num_grid_pts, 1):
+                raise ValueError("Checkpoint geometry does not match its voxel layout.")
+        elif 'frozen_vox_geo' in state:
+            self.frozen_vox_geo = state['frozen_vox_geo'].to(
+                device=device, dtype=torch.float32).contiguous()
+            if self.frozen_vox_geo.shape != (self.num_voxels, 8):
+                raise ValueError("Checkpoint corner geometry must have shape [N, 8].")
+        else:
+            raise ValueError("Checkpoint has no voxel geometry.")
 
-        if state_dict.get('quantized', False):
-            dequantize_state_dict(state_dict)
-
-        self.active_sh_degree = state_dict['active_sh_degree']
-
-        self.scene_center = state_dict['scene_center'].cuda()
-        self.inside_extent = state_dict['inside_extent'].cuda()
-        self.scene_extent = state_dict['scene_extent'].cuda()
-
-        self.octpath = state_dict['octpath'].cuda()
-        self.octlevel = state_dict['octlevel'].cuda().to(torch.int8)
-
-        self._geo_grid_pts = state_dict['_geo_grid_pts'].cuda().requires_grad_()
-        self._sh0 = state_dict['_sh0'].cuda().requires_grad_()
-        self._shs = state_dict['_shs'].cuda().requires_grad_()
-
-        # Subdivision priority trackor
+        self.loaded_legacy_sh = version == 1 and '_sh0' in state
+        if self.loaded_legacy_sh:
+            warnings.warn(
+                "Loading a legacy SH checkpoint as a REF warm start: constant "
+                "RGB initializes albedo; directional SH color is discarded and "
+                "specular appearance must be trained again.", UserWarning)
+            self._configure_appearance(**self.appearance_config, device=device)
+            self._init_appearance((state['_sh0'].to(device) * 0.28209479177387814 + 0.5).clamp(0, 1))
+        else:
+            if version != 2:
+                raise ValueError("Checkpoint is neither a REF model nor a supported legacy SH model.")
+            self._configure_appearance(**state['appearance_config'], device=device)
+            channels = (3, 1, 3, self.bottleneck_dim)
+            for name, count in zip(APPEARANCE_PARAMS, channels):
+                value = state[name].to(device=device, dtype=torch.float32).contiguous()
+                if value.shape != (self.num_voxels, count):
+                    raise ValueError(f"Invalid checkpoint shape for {name}: {tuple(value.shape)}.")
+                setattr(self, name, value.requires_grad_())
+            self._specular_mlp.load_state_dict(state['specular_mlp'], strict=True)
         self._subdiv_p = torch.ones(
-            [self.num_voxels, 1],
-            dtype=torch.float32, device="cuda").requires_grad_()
+            self.num_voxels, 1, dtype=torch.float32, device=device).requires_grad_()
 
     def save_iteration(self, model_path, iteration, quantize=False):
-        path = os.path.join(model_path, "checkpoints", f"iter{iteration:06d}_model.pt")
+        path = os.path.join(model_path, 'checkpoints', f'iter{iteration:06d}_model.pt')
         self.save(path, quantize=quantize)
         self.latest_save_iter = iteration
 
     def load_iteration(self, model_path, iteration=-1):
         if iteration == -1:
-            # Find the maximum iteration if it is -1.
-            fnames = os.listdir(os.path.join(model_path, "checkpoints"))
-            loaded_iter = max(int(re.sub("[^0-9]", "", fname)) for fname in fnames)
-        else:
-            loaded_iter = iteration
-
-        path = os.path.join(model_path, "checkpoints", f"iter{loaded_iter:06d}_model.pt")
+            directory = os.path.join(model_path, 'checkpoints')
+            matches = [re.fullmatch(r'iter(\d+)_model\.pt', f) for f in os.listdir(directory)]
+            iterations = [int(m.group(1)) for m in matches if m is not None]
+            if not iterations:
+                raise FileNotFoundError(f'No model checkpoints found in {directory}.')
+            iteration = max(iterations)
+        path = os.path.join(model_path, 'checkpoints', f'iter{iteration:06d}_model.pt')
         self.load(path)
-
         self.loaded_iter = iteration
+        return iteration
 
-        return loaded_iter
+
+def quantize_state_dict(state):
+    # Shared network weights are small and remain full precision.
+    for name in ('_geo_grid_pts', 'frozen_vox_geo', *APPEARANCE_PARAMS):
+        value = state.get(name)
+        if torch.is_tensor(value):
+            state[name] = quantization(value)
 
 
-# Quantization utilities to reduce size when saving model.
-# It can reduce ~70% model size with minor PSNR drop.
-def quantize_state_dict(state_dict):
-    state_dict['_geo_grid_pts'] = quantization(state_dict['_geo_grid_pts'])
-    state_dict['_sh0'] = [quantization(v) for v in state_dict['_sh0'].split(1, dim=1)]
-    state_dict['_shs'] = [quantization(v) for v in state_dict['_shs'].split(1, dim=1)]
+def dequantize_state_dict(state):
+    for name in ('_geo_grid_pts', 'frozen_vox_geo', *APPEARANCE_PARAMS):
+        value = state.get(name)
+        if isinstance(value, dict):
+            state[name] = dequantization(value)
+    # Read the old per-channel SH quantization only for checkpoint migration.
+    for name in ('_sh0', '_shs'):
+        if isinstance(state.get(name), list):
+            parts = [dequantization(value) for value in state[name]]
+            state[name] = (torch.cat(parts, dim=1) if parts else
+                           torch.empty(len(state['octpath']), 0, 3))
 
-def dequantize_state_dict(state_dict):
-    state_dict['_geo_grid_pts'] = dequantization(state_dict['_geo_grid_pts'])
-    state_dict['_sh0'] = torch.cat(
-        [dequantization(v) for v in state_dict['_sh0']], dim=1)
-    state_dict['_shs'] = torch.cat(
-        [dequantization(v) for v in state_dict['_shs']], dim=1)
 
 def quantization(src_tensor, max_iter=10):
     src_shape = src_tensor.shape
+    if src_tensor.numel() == 0:
+        return dict(index=src_tensor.to(torch.uint8), codebook=src_tensor.new_zeros(256))
     src_vals = src_tensor.flatten().contiguous()
     order = src_vals.argsort()
-    quantile_ind = (torch.linspace(0,1,257) * (len(order) - 1)).long().clamp_(0, len(order)-1)
+    quantile_ind = (torch.linspace(0,1,257, device=src_tensor.device) * (len(order) - 1)).long().clamp_(0, len(order)-1)
     codebook = src_vals[order[quantile_ind]].contiguous()
     codebook[0] = -torch.inf
     ind = torch.searchsorted(codebook, src_vals)

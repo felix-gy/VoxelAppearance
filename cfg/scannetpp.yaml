@@ -25,4 +25,4 @@ regularizer:
   lambda_ascending: 0.01
 
 procedure:
-  reset_sh_ckpt: [15000]
+  reset_albedo_ckpt: [15000]

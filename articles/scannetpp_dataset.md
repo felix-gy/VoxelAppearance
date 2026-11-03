@@ -24,8 +24,11 @@ The config file is provided in `cfg/scannetpp.yaml`. We detail the setting as fo
 **Scene bound heuristic.**
 As this is a fully indoor dataset, we set `outside_level` to zero and assume the entire scene is inside the main scene bound. The world center is set to the centroid of training cameras and the scene radius is set to two times the maximum distance from world center to the cameras.
 
-**SH reset trick.**
-We find the view-dependent color from SH is not generalized well so we implement a trick by resetting the sh component near the end of optimization. This trick improve quality on the view "extrapolation" task like ScanNet++ dataset, while it slightly reduces quality on view "interpolation" task like mipnerf360.
+**Albedo reset in the REF fork.**
+`reset_albedo_ckpt` fuses camera colors into diffuse albedo late in optimization.
+The original implementation reset SH coefficients; this fork does not store SH
+and retains the shared specular network. The original reset trick's quality
+measurements do not establish a benefit for this new appearance model.
 
 **Density ascending regularizer.**
 It encourages the derived normal from the density field to point toward the camera side. It improves geometry qualitatively and slightly improve quantitative result.
