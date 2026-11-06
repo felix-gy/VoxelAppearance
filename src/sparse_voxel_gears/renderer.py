@@ -8,6 +8,7 @@
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 import svraster_cuda
 
 from src.utils.image_utils import resize_rendering
@@ -65,7 +66,7 @@ class SVRenderer:
 
         color_mode = "ref" if color_mode is None else color_mode
         if color_mode == "ref":
-            active_rgb = self.evaluate_color(idx, geos[idx], cam_pos, viewdir)
+            active_rgb = self._evaluate_color_chunked(idx, geos, cam_pos, viewdir)
             rgbs = geos.new_zeros((self.num_voxels, 3))
             rgbs[idx] = active_rgb
         elif color_mode == "albedo":
@@ -90,6 +91,32 @@ class SVRenderer:
             vox_params['subdiv_p'] = geos.new_ones((self.num_voxels, 1))
 
         return vox_params
+
+    def _evaluate_color_chunked(self, idx, geos, cam_pos, viewdir):
+        """Bound shading workspaces and retain only checkpoint inputs for backward.
+
+        Plain chunking still retains every block's activation graph. Non-reentrant
+        checkpointing also handles a frozen geometry input: the MLP and raw
+        appearance parameters captured by evaluate_color still receive gradients.
+        Runtime memory controls are not restored from model checkpoints, allowing
+        a saved model to be rendered with smaller blocks on another GPU.
+        """
+        if len(idx) == 0:
+            return self.evaluate_color(idx, geos[idx], cam_pos, viewdir)
+        active_viewdir = (viewdir is not None and
+                          viewdir.shape == (len(idx), 3) and
+                          viewdir.shape != (self.num_voxels, 3))
+        colors = []
+        for start in range(0, len(idx), self.color_chunk_size):
+            block_idx = idx[start:start + self.color_chunk_size]
+            block_viewdir = (viewdir[start:start + self.color_chunk_size]
+                             if active_viewdir else viewdir)
+            args = (block_idx, geos[block_idx], cam_pos, block_viewdir)
+            if torch.is_grad_enabled() and self.color_checkpoint:
+                colors.append(checkpoint(self.evaluate_color, *args, use_reentrant=False))
+            else:
+                colors.append(self.evaluate_color(*args))
+        return torch.cat(colors, dim=0)
 
     def evaluate_color(self, idx, active_geos, cam_pos=None, viewdir=None):
         """Shade selected voxels; active_geos is [len(idx), 8].

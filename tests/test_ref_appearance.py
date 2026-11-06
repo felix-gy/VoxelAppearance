@@ -157,6 +157,54 @@ class AppearanceIntegrationTests(unittest.TestCase):
         self.assertTrue(all(p.grad is None or p.grad.isfinite().all()
                             for p in model._specular_mlp.parameters()))
 
+    def test_checkpointed_chunks_match_colors_and_all_gradients(self):
+        model = self.make_model()
+        idx = torch.tensor([2, 0])
+        directions = model.vox_center - self.camera
+        params = [model._geo_grid_pts, *(getattr(model, n) for n in model.per_voxel_param_lst),
+                  *model._specular_mlp.parameters()]
+        model.color_checkpoint = False
+        expected = model.vox_fn(idx, self.camera)['rgbs']
+        expected_grads = torch.autograd.grad(expected.square().sum(), params)
+        model.color_chunk_size = 1
+        for use_checkpoint in (False, True):
+            model.color_checkpoint = use_checkpoint
+            for viewdir in (None, directions, directions[idx]):
+                with self.subTest(checkpoint=use_checkpoint, viewdir=viewdir is not None):
+                    actual = model.vox_fn(idx, self.camera, viewdir=viewdir)['rgbs']
+                    actual_grads = torch.autograd.grad(actual.square().sum(), params)
+                    torch.testing.assert_close(actual, expected)
+                    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+                        torch.testing.assert_close(actual_grad, expected_grad, atol=1e-7, rtol=1e-4)
+        with torch.no_grad():
+            torch.testing.assert_close(model.vox_fn(idx, self.camera)['rgbs'], expected)
+
+    def test_checkpoint_retains_less_activation_data_and_handles_frozen_geometry(self):
+        model = self.make_model(color_chunk_size=1)
+        model.freeze_vox_geo()
+        idx = torch.arange(model.num_voxels)
+
+        def retained_elements(checkpoint_enabled):
+            model.color_checkpoint = checkpoint_enabled
+            saved_bytes = []
+
+            def pack(tensor):
+                saved_bytes.append(tensor.numel() * tensor.element_size())
+                return tensor
+
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+                rgb = model.vox_fn(idx, self.camera)['rgbs']
+            rgb.sum().backward()
+            self.assertIsNotNone(model._albedo.grad)
+            self.assertIsNotNone(next(model._specular_mlp.parameters()).grad)
+            return sum(saved_bytes)
+
+        full = retained_elements(False)
+        checkpointed = retained_elements(True)
+        self.assertLess(checkpointed, full / 4)
+        with self.assertRaises(ValueError):
+            SparseVoxelModel(color_chunk_size=0)
+
     def test_initialization_uses_float32_even_if_default_dtype_differs(self):
         original_dtype = torch.get_default_dtype()
         try:

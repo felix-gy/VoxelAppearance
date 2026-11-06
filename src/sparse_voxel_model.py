@@ -43,7 +43,8 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
 
     def __init__(self, n_samp_per_vox=1, ss=1.5, white_background=False,
                  black_background=False, ide_degree=5, hidden_dim=64,
-                 bottleneck_dim=8, normal_eps=1e-4, ide_dim=None):
+                 bottleneck_dim=8, normal_eps=1e-4, ide_dim=None,
+                 color_chunk_size=32768, color_checkpoint=True):
         """Create shared appearance modules; voxel tensors are allocated later.
 
         model_init(), octpath_init() and load() all initialize the per-voxel
@@ -54,6 +55,12 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
         self.ss = ss
         self.white_background = white_background
         self.black_background = black_background
+        if isinstance(color_chunk_size, bool) or not isinstance(color_chunk_size, int) or color_chunk_size < 1:
+            raise ValueError("color_chunk_size must be a positive integer.")
+        if not isinstance(color_checkpoint, bool):
+            raise ValueError("color_checkpoint must be a boolean.")
+        self.color_chunk_size = color_chunk_size
+        self.color_checkpoint = color_checkpoint
         self.per_voxel_attr_lst = ['octpath', 'octlevel', '_subdiv_p']
         self.per_voxel_param_lst = [
             '_albedo', '_roughness', '_specular_tint', '_bottleneck',

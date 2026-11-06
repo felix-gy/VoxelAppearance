@@ -39,6 +39,18 @@ We now only support pinhole camera mode. Please preprocess with `--colmap_camera
 ```bash
 python train.py --eval --source_path $DATA_PATH --model_path $OUTPUT_PATH
 ```
+For the REF model on an RTX 3060 with 12 GB, use the memory profile after the
+dataset config, for example:
+```bash
+python train.py --eval --source_path data/nerf_synthetic/materials \
+  --model_path out/materials_3060 \
+  --cfg_files cfg/synthetic_nerf.yaml cfg/rtx3060_12gb.yaml \
+  --lambda_normal_dmean 0.001 --lambda_normal_dmed 0.001
+```
+This enables checkpointed color blocks, gradual subdivision, a one-million-voxel
+cap and IDE degree 3, and disables supersampling. GPU memory still depends on
+the scene and rasterization workload; see [memory controls](./articles/ref_appearance.md#memory-controls).
+
 All the results will be saved into the specified `$OUTPUT_PATH` including the following results:
 - `config.yaml`: The config file for reproduction.
 - `pg_view/`: Visualization of the training progress. Useful for debugging.

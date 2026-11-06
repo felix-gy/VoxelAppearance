@@ -331,7 +331,7 @@ def training(args):
             subdivide_mask = (priority > thres) & valid_mask
 
             # In case the number of voxels over the threshold
-            max_n_subdiv = round((cfg.procedure.subdivide_max_num - voxel_model.num_voxels) / 7)
+            max_n_subdiv = max(0, (cfg.procedure.subdivide_max_num - voxel_model.num_voxels) // 7)
             if subdivide_mask.sum() > max_n_subdiv:
                 n_removed = subdivide_mask.sum() - max_n_subdiv
                 subdivide_mask &= (priority > priority[subdivide_mask].sort().values[n_removed-1])

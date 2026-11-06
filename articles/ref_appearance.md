@@ -79,3 +79,25 @@ executes the real rasterizer, backward pass, optimizer steps and checkpoint
 roundtrip when CUDA is available. CPU checks alone do not establish rendering
 quality, GPU memory use or speed; compare those against the SH baseline on held
 out views after training.
+
+## Memory controls
+
+`model.color_chunk_size` defaults to 32768 visible voxels per shading block.
+`model.color_checkpoint` defaults to true: training recomputes IDE/MLP
+activations during backward rather than retaining all blocks' intermediate
+tensors. This trades computation for memory without changing the color model
+or stopping its gradients. Evaluation under `torch.no_grad()` still uses blocks
+but does not need checkpoint recomputation. These runtime controls are not
+restored from checkpoint metadata, so smaller blocks can be selected when
+loading a model on another GPU.
+
+For a conservative starting point on 12 GB, append `cfg/rtx3060_12gb.yaml` after
+the dataset YAML. It uses degree 3 (20 IDE features), disables supersampling and
+the initial subdivision of all eligible voxels, and caps the total at one
+million voxels. These choices reduce model capacity and antialiasing; their
+quality/performance tradeoff must be measured on the target scene. The profile
+is not a measured guarantee of fitting every scene in 12 GB.
+
+If memory is still insufficient, set `--color_chunk_size 16384` and/or
+`--subdivide_max_num 500000`. A smaller block reduces shading workspaces;
+the voxel cap also reduces persistent model/optimizer and rasterizer storage.

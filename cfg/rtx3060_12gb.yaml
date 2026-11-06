@@ -1,0 +1,13 @@
+# Memory-conservative REF starting point. Apply AFTER the dataset configuration.
+model:
+  ide_degree: 3
+  color_chunk_size: 32768
+  color_checkpoint: True
+  ss: 1.0
+
+regularizer:
+  ss_aug_max: 1.0
+
+procedure:
+  subdivide_all_until: 0
+  subdivide_max_num: 1000000
