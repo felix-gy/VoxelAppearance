@@ -1,5 +1,7 @@
 # Integración Vertex-MLP Fourier-3 trilineal en SVRaster
 
+> Actualización posterior: el entrenamiento conjunto y el visor están documentados en [Implementacion_VertexMLP_Conjunta_Visor_NeRF_Synthetic.md](Implementacion_VertexMLP_Conjunta_Visor_NeRF_Synthetic.md). Este informe conserva el alcance de la variante congelada y sus resultados históricos.
+
 ## Estado y alcance
 
 Implementación completada y validada en Conda `svraster`: decoder, forward y

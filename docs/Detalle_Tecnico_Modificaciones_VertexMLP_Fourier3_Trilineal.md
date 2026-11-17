@@ -1,5 +1,7 @@
 # Auditoría técnica de modificaciones: Vertex-MLP Fourier-3 trilineal
 
+> Actualización posterior: el entrenamiento conjunto y el visor están documentados en [Implementacion_VertexMLP_Conjunta_Visor_NeRF_Synthetic.md](Implementacion_VertexMLP_Conjunta_Visor_NeRF_Synthetic.md). Este informe conserva el alcance de la variante congelada y sus resultados históricos.
+
 ## 1. Alcance, fuente de verdad y criterio de lectura
 
 Este documento detalla **el código implementado**, no solamente el diseño
