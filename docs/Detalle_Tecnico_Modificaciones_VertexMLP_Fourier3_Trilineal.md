@@ -780,9 +780,9 @@ Tras normalizar namespace/guard/include, la firma coincide con la original.
 +            collected_rgb[thread_id] = rgbs[vox_id * 9];
          }
          block.sync();
- 
+
 @@ -254,7 +254,13 @@
- 
+
              // Accumulate to the pixel.
              float pt_w = T * alpha;
 -            C = C + pt_w * collected_rgb[j];
@@ -793,7 +793,7 @@ Tras normalizar namespace/guard/include, la firma coincide con la original.
 +            color.y = fmaxf(color.y, 0.f);
 +            color.z = fmaxf(color.z, 0.f);
 +            C = C + pt_w * color;
- 
+
              if (need_depth)
              {
 @@ -761,11 +767,17 @@
@@ -805,7 +805,7 @@ Tras normalizar namespace/guard/include, la firma coincide con la original.
          AT_ERROR("rgbs should be either (num_points, 3)");
      if (vox_centers.size(0) != rgbs.size(0))
          AT_ERROR("size mismatch");
- 
+
 +    TORCH_CHECK(rgbs.is_cuda() && rgbs.scalar_type() == torch::kFloat32 && rgbs.is_contiguous(), "Expected contiguous float32 CUDA RGB buffer");
 +    TORCH_CHECK(rgbs.dim() == 2 && rgbs.size(0) == vox_centers.size(0) && rgbs.size(1) == 27, "Expected RGB [V,27]");
 +    TORCH_CHECK(geos.is_cuda() && geos.scalar_type() == torch::kFloat32 && geos.is_contiguous(), "Expected contiguous float32 CUDA geometry");
@@ -834,17 +834,17 @@ Tras normalizar namespace/guard/include, la firma coincide con la original.
 +            collected_rgb[thread_id] = rgbs[vox_id * 9];
          }
          block.sync();
- 
+
 @@ -338,7 +338,10 @@
              // Load from share memory.
              const int vox_id = collected_vox_id[j];
- 
+
 -            const float3 c = collected_rgb[j];
 +            float3 pre = collected_rgb[j];
 +            for (int corner=0; corner<8; ++corner)
 +                pre = pre + interp_w[corner] * rgbs[vox_id * 9 + 1 + corner];
 +            const float3 c = make_float3(fmaxf(pre.x,0.f), fmaxf(pre.y,0.f), fmaxf(pre.z,0.f));
- 
+
              // The gradients w.r.t. voxel alpha.
              float dL_dpt_w = dot(dL_dpix, c);
 @@ -512,7 +515,11 @@
@@ -861,7 +861,7 @@ Tras normalizar namespace/guard/include, la firma coincide con la original.
              for (int iii=0; iii<8; ++iii)
                  grad_pack[iii] = dL_dgeo_params[iii];
 @@ -523,8 +530,8 @@
- 
+
              const int base_id = cg::this_grid().thread_rank();
              #pragma unroll
 -            for (int iii=0; iii<12; ++iii)
@@ -874,7 +874,7 @@ Tras normalizar namespace/guard/include, la firma coincide con la original.
 @@ -692,17 +699,23 @@
      if (vox_centers.ndimension() != 2 || vox_centers.size(1) != 3)
          AT_ERROR("vox_centers must have dimensions (num_points, 3)");
- 
+
 +    TORCH_CHECK(rgbs.is_cuda() && rgbs.scalar_type() == torch::kFloat32 && rgbs.is_contiguous(), "Expected contiguous float32 CUDA RGB buffer");
 +    TORCH_CHECK(rgbs.dim() == 2 && rgbs.size(0) == vox_centers.size(0) && rgbs.size(1) == 27, "Expected RGB [V,27]");
 +    TORCH_CHECK(geos.is_cuda() && geos.scalar_type() == torch::kFloat32 && geos.is_contiguous(), "Expected contiguous float32 CUDA geometry");
@@ -882,7 +882,7 @@ Tras normalizar namespace/guard/include, la firma coincide con la original.
 +    TORCH_CHECK(rgbs.device() == geos.device() && rgbs.device() == vox_centers.device(), "Device mismatch");
 +    TORCH_CHECK(n_samp_per_vox == 1, "Vertex appearance requires one sample");
      const int P = vox_centers.size(0);
- 
+
      if (P == 0)
      {
 -        torch::Tensor dL_dgeos = torch::empty({0});
@@ -893,23 +893,22 @@ Tras normalizar namespace/guard/include, la firma coincide con la original.
 +        torch::Tensor subdiv_p_bw = torch::zeros({0,1}, geos.options());
          return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw);
      }
- 
+
 -    torch::Tensor dL_dvox = torch::zeros({P, geos.size(1)+3+1}, vox_centers.options());
 +    torch::Tensor dL_dvox = torch::zeros({P, geos.size(1)+3+1+24}, vox_centers.options());
      dim3 tile_grid((image_width + BLOCK_X - 1) / BLOCK_X, (image_height + BLOCK_Y - 1) / BLOCK_Y, 1);
      dim3 block(BLOCK_X, BLOCK_Y, 1);
- 
+
 @@ -760,9 +773,9 @@
          dL_dvox.contiguous().data_ptr<float>());
      CHECK_CUDA(debug);
- 
+
 -    std::vector<torch::Tensor> gradient_lst = dL_dvox.split({geos.size(1), 3, 1}, 1);
 +    std::vector<torch::Tensor> gradient_lst = dL_dvox.split({geos.size(1), 3, 1, 24}, 1);
      torch::Tensor dL_dgeos = gradient_lst[0].contiguous();
 -    torch::Tensor dL_drgbs = gradient_lst[1].contiguous();
 +    torch::Tensor dL_drgbs = torch::cat({gradient_lst[1], gradient_lst[3]}, 1).contiguous();
      torch::Tensor subdiv_p_bw = gradient_lst[2].contiguous();
- 
+
      return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw);
 ```
-
