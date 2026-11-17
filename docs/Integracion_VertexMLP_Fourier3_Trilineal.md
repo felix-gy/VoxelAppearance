@@ -1,187 +1,215 @@
-# Integración Vertex-MLP Fourier-3 trilineal
+# Integración Vertex-MLP Fourier-3 trilineal en SVRaster
 
-## Protocolo
+## Estado y alcance
 
-Base: `out/materials_t/checkpoints/iter020000_model.pt`; configuración de
-`out/materials_t/config.yaml`. MSE + 0.02 SSIM, ss=1.5, fondo blanco,
-semilla 3721. Geometría fija. El formato base permanece independiente.
+Implementación completada y validada en Conda `svraster`: decoder, forward y
+backward CUDA, entrenamiento de apariencia, inferencia, persistencia,
+reanudación, pruebas automáticas y comparación con SH0, SH3 y RGB por vértice.
+Ambas variantes completaron 5000 pasos. El resultado funcional no implica
+superar al baseline SH3; los resultados medidos se muestran abajo.
 
-## Estado y trazabilidad
+## Protocolo y entorno
 
-Implementación en curso. No se han validado todavía kernels, entrenamiento ni
-rendimiento de la variante. No interpretar los hiperparámetros como resultados.
+- Base: `out/materials_t/checkpoints/iter020000_model.pt`, sin cuantización.
+- Configuración base: `out/materials_t/config.yaml`.
+- Datos: `data/nerf_synthetic/materials`; 200 vistas test.
+- MSE + 0.02·(1−SSIM), usando la implementación SSIM existente.
+- Fondo blanco, autoexposición desactivada, ss=1.5 fijo, una muestra por segmento.
+- Semilla 3721; cámaras en épocas completas barajadas, idénticas para las variantes.
+- Adam: LR características/RGB 0.01, LR MLP 0.001, betas (0.9,0.99), eps 1e-8.
+- Sin poda, subdivisión, regularizadores CUDA/geométricos ni scheduler.
+- Validación cada 500 pasos, checkpoint cada 1000 y al finalizar.
+- RTX 3060 12 GiB; PyTorch 2.5.0+cu124; toolkit de compilación CUDA 12.5.
+- Se corrigió la instalación editable: paquete y binario ahora provienen de este
+  checkout, no de `/home/felix/Projects/svraster`.
 
-## Cambios
+El checkpoint tiene P=4.338.721 vértices y V=2.937.583 vóxeles. H y MLP suman
+34.711.691 parámetros; el control aprende únicamente 3P valores RGB.
 
-- `src/vertex_appearance/decoder.py`: Fourier de tres bandas y MLP compartida
-  26→64→3; última capa cero. Incluye control RGB por vértice.
-- Los buffers del rasterizador permanecen globales; el orden de esquinas es
-  000,001,010,011,100,101,110,111.
+## Arquitectura y contratos
 
-## Implicaciones
+Cámara → direcciones mundo cámara→vértice → Fourier → MLP compartida → gather
+por vox_key → interpolación CUDA en el punto medio original → composición.
 
-4.338.721 vértices, 2.937.583 vóxeles. Gather RGB: aproximadamente 269 MiB.
-Las activaciones y Adam requieren memoria adicional. CUDA debe compilarse desde
-este checkout: el entorno Conda svraster apuntaba inicialmente a otro proyecto.
+- `H[P,8]`, Fourier `[P,18]`, entrada `[P,26]`, MLP `26→64→3` (1923 parámetros).
+- Frecuencias π,2π,4π; cada banda contiene sin(XYZ),cos(XYZ), sin dirección cruda.
+- Última capa cero; sin sigmoid/tanh. Primera capa y H pueden tener gradiente
+  cero en el primer backward y recibirlo después del primer paso.
+- Residual `[P,3]`, gather `[V,8,3]`, float32 contiguo en CUDA.
+- Transporte interno `[V,27]`: RGB base seguido de los ocho RGB residuales.
+- SH0 se evalúa mediante el mecanismo original (factor SH, +0.5 y clamp mínimo).
+- Color de muestra: max(SH0 + suma de pesos trilineales por residual, 0).
+- Orden de esquinas: 000,001,010,011,100,101,110,111; k=4bx+2by+bz.
+- Se reutilizan los pesos del punto medio de densidad; alfa, sus umbrales,
+  ordenamiento, T, depth, normales, fondos y clamp final permanecen originales.
 
-## Validación inicial
+Los buffers usan índices **globales**, aunque vox_fn recibe índices visibles.
+freeze_vox_geo produce [V,8]; no se compacta. La validación inicial comprueba
+formas, tipos, límites de índices, coordenadas finitas y hasta 4096 vóxeles para
+verificar geométricamente el orden de esquinas, sin duplicar el gather global.
 
-Compilación con Conda `svraster`, PyTorch 2.5.0/cu124 y toolkit 12.5.
-Paquete y binario cargados desde este checkout. `python -m pytest tests -q`:
-5 pruebas aprobadas (Fourier, inicialización, regresión SH0, invariancia de
-geometría, diferencias finitas y overfit sintético).
+El backward empaqueta 36 valores por vóxel: 8 de geometría, 3 base, 1 prioridad
+y 24 residuales. Acumula por operaciones atómicas, aplica la máscara preclamp>0
+y los pesos originales, sin duplicar alfa/transmitancia. Autograd del gather
+suma vértices compartidos y deriva la MLP. El wrapper desacopla geometría, SH0
+y prioridad: solo la apariencia recibe gradientes, incluso desde otros scripts.
 
-## Cambios CUDA
+## Inventario de cambios e implicaciones
 
-Se añaden `vertex_forward` y `vertex_backward` como especializaciones separadas
-basadas en los kernels originales; no se modifican sus implementaciones SH.
-El transporte interno empaqueta base RGB y 8 residuales en `[V,27]`. El buffer
-backward usa 36 valores (8 geometría, 3 base, 1 prioridad, 24 residuales).
-Esta desviación del buffer independiente propuesto preserva la interfaz de
-retornos existente, pero duplica código CUDA que debe mantenerse sincronizado.
-La MLP no se ejecuta en CUDA personalizado y se usa el mismo `interp_w` de densidad.
+| Archivos | Modificación e implicación |
+|---|---|
+| `src/vertex_appearance/decoder.py`, `__init__.py` | Fourier y módulos VertexAppearance/VertexRGB independientes |
+| `src/vertex_appearance/layout.py` | Validación del layout antes de reservar apariencia |
+| `src/vertex_appearance/checkpoint.py` | Schema v2 de apariencia, identidad geométrica y reanudación |
+| `src/vertex_appearance/runtime.py` | Configuración, entrenamiento, evaluación e instrumentación |
+| `train_vertex_fourier3.py`, `render_vertex_fourier3.py` | Nuevas CLI; entrenamiento original independiente |
+| `cfg/vertex_fourier3_trilinear.yaml` | Protocolo y arquitectura validados |
+| `src/sparse_voxel_gears/renderer.py` | Nuevo render_vertex y eventos opcionales; render original conservado |
+| `cuda/svraster_cuda/renderer.py` | Dispatch del modo y transporte autograd del RGB empaquetado |
+| `cuda/src/vertex_forward.cu`, `.h` | Nueva ruta de color espacial; recompilación requerida |
+| `cuda/src/vertex_backward.cu`, `.h` | Gradientes por esquinas y validación de entradas |
+| `cuda/binding.cpp`, `cuda/setup.py` | Nuevas exportaciones y unidades CUDA |
+| `tests/test_fourier3.py`, `test_trilinear_reference.py` | Referencias de codificación, pesos y acumulación |
+| `tests/test_vertex_checkpoint.py`, `test_vertex_cuda.py` | Persistencia, regresión, diferenciación y overfit |
+| `requirements-dev.txt` | Dependencia pytest de desarrollo |
+| Este documento | Cambios, decisiones, resultados y reproducción |
 
-## Uso
+SVInOut, el formato geométrico, las propiedades del modelo, train.py y los
+kernels SH originales no cambian. La interfaz conserva los cinco resultados
+color,depth,normal,T,max_w y el diccionario del renderer con sus campos raw_*.
+
+## Decisiones respecto de la especificación
+
+- Método render_vertex y appearance_mode independiente de color_mode.
+- Configuración YAML propia en lugar de ampliar el estado global YACS:
+  defaults del archivo propio → protocolo base → overrides explícitos.
+  En reanudación/inferencia prevalece la configuración resuelta del checkpoint.
+- Kernels separados basados en los originales, para preservar su ruta SH.
+  Implica duplicación que debe mantenerse sincronizada si cambia el rasterizador.
+- Buffer RGB/gradientes empaquetado en lugar de un retorno adicional; conserva
+  la aridad de autograd y las salidas públicas.
+- Las pruebas directas del kernel y autograd sustituyen la ruta provisional de
+  promedio de esquinas, que no forma parte de la implementación final.
+- Se usan los valores fotométricos de materials_t, no los L1/SSIM ilustrativos.
+- Los runs smoke/debug previos no son el experimento final. Un debug inicial
+  muestreaba con reemplazo: se corrigió y se reinició desde cero el run definitivo.
+- Un solapamiento accidental de dos ejecuciones reales agotó VRAM; se repitió
+  con GPU libre, sin cambiar precisión ni algoritmo.
+
+## Persistencia y compatibilidad
+
+Checkpoints independientes con versión, modo, configuración resuelta, estado
+neuronal, Adam, paso y estados aleatorios CPU/CUDA/generador. Las cámaras se
+reconstruyen reproduciblemente desde semilla y paso. La carga valida P,V,
+hash de topología/orden de grid_pts_key/coordenadas mundo y SHA-256 del archivo
+geométrico. Se puede reubicar el mismo archivo mediante --geometry-checkpoint.
+No se permite reutilizar H con otro orden de vértices sin remapeo explícito.
+
+No hay caché de RGB entre renders. Inferencia usa eval y no_grad. El control
+VertexRGB aprende [P,3] sin Fourier/MLP y comparte el mismo kernel y protocolo.
+El benchmark mueve apariencia a CPU durante SH0/SH3 para excluir sus parámetros
+inutilizados de la memoria asignada a esos baselines.
+
+## Validación
+
+**17 pruebas aprobadas**, incluidas las CUDA. Se verificaron Fourier,
+normalización angular, inicialización y gradientes tras dos pasos, pesos
+trilineales, acumulación compartida, regresión SH0, invariancia geométrica,
+diferencias finitas, clamp, guardar/cargar/render, frustum vacío/parcial,
+esquinas geométricas, índices inválidos, aislamiento SH y overfit de una/dos vistas.
+El layout real de materials_t también pasó su validación. Se comparó además
+una vista SH3 real entre la extensión del checkout anterior y la nueva:
+error absoluto máximo RGB=0 y T=0. La reanudación real
+funcionó; las corridas comparativas definitivas comenzaron desde cero.
+
+Tolerancias: regresión y persistencia 1e-5; gradientes sintéticos float32
+atol=1e-4, rtol=1e-2 lejos de umbrales. Advertencias de pytest/MiniCam existentes
+no indican fallos numéricos. git diff --check sin errores.
+
+## Resultados comparativos finales
+
+Métricas sobre imágenes float32, mismo protocolo en los cuatro métodos; PNG
+exportados para inspección. PSNR/SSIM/LPIPS promediados sobre 200 vistas test.
+
+| Método | PSNR | SSIM | LPIPS | LPIPS corregido | FPS total |
+|---|---:|---:|---:|---:|---:|
+| SH0 | 23.65449 | 0.901724 | 0.077471 | 0.091297 | 99.76 |
+| SH3 | 29.96786 | 0.954652 | 0.035469 | 0.043374 | 81.26 |
+| Vertex-MLP Fourier-3 | 27.89134 | 0.935391 | 0.059812 | 0.072690 | 16.80 |
+| RGB por vértice | 24.94174 | 0.921024 | 0.065948 | 0.077455 | 58.89 |
+
+La variante neuronal mejora SH0 en 4.24 dB,
+pero queda 2.08 dB por debajo de SH3 y es
+más lenta. Frente al control RGB mejora 2.95 dB.
+Estos resultados no demuestran una ventaja sobre SH3.
+
+## Rendimiento y memoria
+
+Eventos CUDA, 10 vistas de calentamiento y 50 mediciones de vistas test.
+Total incluye apariencia, gather, raster y posprocesamiento, excluyendo I/O.
+Raster incluye preprocesamiento geométrico, SH y empaquetado de entradas.
+Fourier/MLP se miden además aisladamente: 7.30 ms
+para direcciones/Fourier y 36.19 ms para
+concatenación/MLP. Apariencia completa: 43.50 ms;
+gather: 2.26 ms.
+
+| Método | Total ms | Raster ms | Post ms | Pico inferencia, bytes |
+|---|---:|---:|---:|---:|
+| SH0 | 10.02 | 9.74 | 0.26 | 1,508,395,008 |
+| SH3 | 12.31 | 12.04 | 0.25 | 1,508,395,008 |
+| Vertex-MLP Fourier-3 | 59.52 | 13.49 | 0.25 | 4,117,459,968 |
+| RGB por vértice | 16.98 | 14.32 | 0.26 | 2,175,752,704 |
+
+Pico asignado entrenamiento: 5,531,939,328 bytes neuronal y 3,270,554,112 bytes
+control. Los parámetros neuronales ocupan 138.846.764 bytes; los RGB de vértices
+52.064.652 y el gather global 282.007.968. parameters_bytes del JSON se refiere
+solo al módulo de apariencia; el pico GPU incluye el modelo base y temporales.
+
+## Reproducción y artefactos
 
 ```bash
 conda activate svraster
+python -m pip install -r requirements-dev.txt
 CUDA_HOME=/usr/local/cuda-12.5 MAX_JOBS=2 python -m pip install -e cuda/ --no-build-isolation
 python -m pytest tests -q
-python train_vertex_fourier3.py --output output/vertex_materials --steps 5000
-python render_vertex_fourier3.py --output output/vertex_materials/eval --appearance-checkpoint output/vertex_materials/checkpoints/iter005000_appearance.pt
+python train_vertex_fourier3.py --output output/vertex_materials_final --steps 5000
+python train_vertex_fourier3.py --output output/vertex_materials_control --mode vertex_rgb_trilinear --steps 5000
+python render_vertex_fourier3.py --output output/vertex_materials_final/comparison --appearance-checkpoint output/vertex_materials_final/checkpoints/iter005000_appearance.pt
+python render_vertex_fourier3.py --output output/vertex_materials_final/benchmark --appearance-checkpoint output/vertex_materials_final/checkpoints/iter005000_appearance.pt --benchmark
 ```
 
-El control usa `--mode vertex_rgb_trilinear`. La ruta original sigue disponible
-mediante `render.py`; los checkpoints geométricos no se reescriben. No hay push.
+Reanudar: añadir --resume RUTA_APPEARANCE.pt --steps TOTAL al entrenamiento.
+Para el control usar su checkpoint y directorio al renderizar/medir. Volver a
+la ruta original: python render.py out/materials_t --skip_train.
 
-## Entrenamiento y persistencia implementados
+Artefactos en output/vertex_materials_final y output/vertex_materials_control:
+config.yaml, checkpoints/iter005000_appearance.pt, test/iter005000/metrics.json,
+PNG renders/gt, memory.json y benchmark/benchmark.json. La comparación SH0/SH3
+está en output/vertex_materials_final/comparison. Datos, binarios, imágenes y
+checkpoints quedan fuera de Git.
 
-- `runtime.py`: configuración YAML específica, carga del protocolo base,
-  congelación, Adam, selección reproducible de cámaras, evaluación y medición.
-  Se usa un diccionario YAML en lugar de ampliar el estado global YACS, para
-  aislar completamente el experimento del entrenamiento adaptativo original.
-- `checkpoint.py`: SHA-256 del archivo base, hash de layout/orden/coordenadas,
-  estado neuronal, Adam y estados aleatorios CPU/CUDA/cámaras. La carga rechaza
-  identidades incompatibles y permite reubicar el checkpoint base.
-- Scripts raíz separados para entrenar y renderizar; control con RGB libre.
-- El instrumento de tiempos distingue raster (incluye preprocesamiento y
-  empaquetado SH0), posprocesamiento, apariencia y gather. Fourier y MLP se
-  miden además aisladamente. El total siempre incluye todas esas operaciones.
+## Limitaciones
 
-Prueba real de dos pasos: 200 vistas test evaluadas, PSNR 23.48459,
-SSIM 0.900107, LPIPS 0.077448 y LPIPS corregido 0.091256.
-Pico asignado durante esta prueba: 5.470.391.296 bytes. Estos valores son una
-prueba de funcionamiento, no el resultado final del experimento.
+CUDA float32, una muestra, geometría fija; sin AMP, RBF, poda/subdivisión ni
+regularizadores CUDA. Se decodifican todos los vértices por vista. Las
+activaciones y el gather global dominan memoria; Fourier/MLP añaden latencia.
+La continuidad del residual está garantizada en interfaces conformes con
+vértices compartidos, no en interfaces adaptativas ni en el color total si
+SH0 cambia entre vóxeles. La calidad depende de la geometría congelada.
 
-Se produjo OOM al solapar accidentalmente evaluación y debug en dos procesos;
-se repitió el debug con GPU libre. No se cambió precisión ni algoritmo.
+## Commits locales de integración
 
-## Validaciones ampliadas y commits
+- `50610e7`: Add Fourier vertex appearance decoder and integration guide
+- `8a43a40`: Add trilinear vertex CUDA forward and backward with regression tests
+- `11abc56`: Add fixed geometry appearance training checkpoints and evaluation tools
+- `31d0ac9`: Validate vertex buffers and checkpoint rendering and preserve camera epochs
+- `e372eee`: Cover camera direction and empty frustum and document integration implications
+- `0673d8f`: Exclude unused appearance parameters from baseline GPU memory measurements
+- `f86857e`: Add development dependencies and two view appearance validation
+- `3295343`: Record complete vertex appearance validation results
+- `31d942f`: Enforce frozen base gradients in vertex rendering wrapper
+- `364d3a9`: Document full materials experiment and baseline performance comparisons
+- `916c795`: Validate global vertex layout before appearance allocation
 
-Tras recompilar las comprobaciones de entrada CUDA: **11 pruebas aprobadas**.
-Se cubren además RGB constante frente a SH, gradiente cero bajo clamp y
-persistencia de la imagen. Se conserva el protocolo de épocas completas
-barajadas, con secuencia reproducible desde semilla y paso al reanudar.
 
-Commits locales iniciales:
-- `50610e7`: decoder Fourier y guía.
-- `8a43a40`: forward/backward CUDA y regresiones.
-- `11abc56`: entrenamiento, persistencia, evaluación e instrumentación.
-
-## Límites
-
-La continuidad garantizada es la del residual entre vóxeles conformes con
-vértices compartidos. No se garantiza continuidad en interfaces adaptativas ni
-en el color total si cambia SH0 entre vóxeles. Los resultados dependen del
-checkpoint geométrico congelado. No se soportan AMP, más de una muestra,
-regularizadores CUDA ni actualización de topología en el modo neuronal.
-
-## Protocolo definitivo
-
-El debug inicial usó selección con reemplazo. Se corrigió a épocas barajadas
-como el baseline y se inició una corrida definitiva independiente desde cero,
-`output/vertex_materials_final`, para comparar de forma consistente con el
-control `output/vertex_materials_control`. Los runs smoke/debug y de reanudación
-no se usarán como resultados finales. El debug de 1000 pasos llegó a un pico
-asignado de 5.530.730.496 bytes.
-
-## Inventario de interfaces y archivos
-
-| Grupo | Archivos | Implicación |
-|---|---|---|
-| Decoder | `src/vertex_appearance/{__init__,decoder}.py` | Fourier y módulos entrenables independientes |
-| Persistencia | `src/vertex_appearance/checkpoint.py` | Nuevo schema v2; no modifica SVInOut |
-| Experimento | `src/vertex_appearance/runtime.py` | Config propia, training, evaluación y benchmark |
-| Entradas | `train_vertex_fourier3.py`, `render_vertex_fourier3.py` | Nuevas CLI, no cambia train.py |
-| Configuración | `cfg/vertex_fourier3_trilinear.yaml` | Parámetros del protocolo y arquitectura |
-| Renderer | `src/sparse_voxel_gears/renderer.py` | Nuevo render_vertex, profiling opcional; color_mode preservado |
-| Autograd | `cuda/svraster_cuda/renderer.py` | Dispatch de modo y gradiente RGB empaquetado |
-| Kernels | `cuda/src/vertex_{forward,backward}.{cu,h}` | Interpolación y backward nuevos, recompilación requerida |
-| Extensión | `cuda/binding.cpp`, `cuda/setup.py` | Exporta y compila kernels adicionales |
-| Tests | `tests/test_{fourier3,trilinear_reference,vertex_checkpoint,vertex_cuda}.py` | Referencias, regresiones y diferenciación |
-
-Para medir: añadir `--benchmark` al comando de render con checkpoint.
-Los checkpoints guardan las frecuencias, convención angular y protocolo base
-resuelto; las modificaciones posteriores del YAML base no alteran su inferencia.
-
-Commit `31d0ac9`: validación estricta de buffers CUDA, configuración efectiva,
-pruebas de render persistente y corrección del protocolo de cámaras.
-
-El benchmark mueve el módulo neuronal a CPU durante las mediciones SH0/SH3,
-para no atribuir su memoria de parámetros a esos baselines. Se mantienen fuera
-de los commits los checkpoints, imágenes y artefactos binarios.
-
-Dependencias de desarrollo: `python -m pip install -r requirements-dev.txt`.
-El entrenamiento aborta explícitamente ante pérdida o gradientes no finitos.
-Las pruebas adicionales incluyen esquinas geométricas y overfit de dos vistas.
-
-## Batería final
-
-`python -m pytest tests -q`: **15 passed** (2,82 s en el entorno svraster).
-Incluye: Fourier y normalización; gradientes tras inicialización cero; pesos
-trilineales y acumulación; checkpoint incompatible; regresión SH0; invariancia
-de T/depth/normal; diferencias finitas; clamps; guardar/cargar/render; frustum
-vacío y parcial; geometría del orden de esquinas; overfit de una y dos vistas.
-Las advertencias provienen de plugins pytest instalados y del constructor
-MiniCam existente. `git diff --check` sin errores.
-
-Las métricas se calculan sobre imágenes float32 renderizadas; los PNG se
-exportan para inspección. Todos los métodos de la comparación usan ese mismo
-criterio. Los datos, renders, modelos y binarios no forman parte de los commits.
-
-El wrapper desacopla explícitamente geometría, prioridad y SH0 de autograd,
-aunque el llamador no haya congelado antes el modelo; solo el residual recibe
-gradientes. Rechaza multimuestreo antes de evaluar la MLP.
-
-## Resultados finales Vertex-MLP (5000 pasos)
-
-RTX 3060, ss=1.5, 200 vistas test, geometría materials_t fija.
-
-| Método | PSNR | SSIM | LPIPS corregido | FPS total |
-|---|---:|---:|---:|---:|
-| SH0 original | 23.65449 | 0.901724 | 0.091297 | 99.76 |
-| SH3 original | 29.96786 | 0.954652 | 0.043374 | 81.26 |
-| Vertex-MLP Fourier-3 | 27.89134 | 0.935391 | 0.072690 | 16.80 |
-
-La variante mejora SH0 en 4.24 dB, pero queda 2.08 dB por debajo de SH3 y
-resulta más lenta. Este experimento no demuestra una ventaja frente a SH3.
-Latencia total 59.52 ms: apariencia 43.50 ms, gather 2.26 ms,
-raster/preprocesamiento 13.49 ms, posprocesamiento 0.25 ms.
-Mediciones aisladas: Fourier/direcciones 7.30 ms y MLP/concatenación 36.19 ms.
-Los tiempos usan 10 vistas de calentamiento y 50 mediciones de vistas test.
-
-Pico asignado de entrenamiento: 5.531.939.328 bytes. Pico de inferencia:
-4.117.459.968 bytes para Vertex-MLP frente a 1.508.395.008 para SH0/SH3.
-Checkpoint: `output/vertex_materials_final/checkpoints/iter005000_appearance.pt`.
-Métricas y PNG: `output/vertex_materials_final/comparison/`.
-Tiempos: `output/vertex_materials_final/benchmark/benchmark.json`.
-
-Batería tras reforzar aislamiento de gradientes: **16 passed**, 2.90 s.
-Commits adicionales: `e372eee` (visibilidad/documentación), `0673d8f`
-(memoria baseline), `f86857e` (dos vistas/dependencias), `3295343`
-(resultados de pruebas), `31d942f` (aislamiento de gradientes del baseline).
-
-`src/vertex_appearance/layout.py` valida al cargar el modelo: formas, tipos,
-dispositivo, límites de vox_key, coordenadas finitas y correspondencia de
-esquinas en una muestra determinista de hasta 4096 vóxeles. Evita materializar
-otro tensor global de esquinas. Incluye prueba de rechazo de índices inválidos.
+El commit que consolida este informe se identifica en git log. No se realizó push.
