@@ -180,3 +180,8 @@ Batería tras reforzar aislamiento de gradientes: **16 passed**, 2.90 s.
 Commits adicionales: `e372eee` (visibilidad/documentación), `0673d8f`
 (memoria baseline), `f86857e` (dos vistas/dependencias), `3295343`
 (resultados de pruebas), `31d942f` (aislamiento de gradientes del baseline).
+
+`src/vertex_appearance/layout.py` valida al cargar el modelo: formas, tipos,
+dispositivo, límites de vox_key, coordenadas finitas y correspondencia de
+esquinas en una muestra determinista de hasta 4096 vóxeles. Evita materializar
+otro tensor global de esquinas. Incluye prueba de rechazo de índices inválidos.

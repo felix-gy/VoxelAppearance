@@ -162,3 +162,13 @@ def test_wrapper_never_trains_base_sh():
     m.render_vertex(c,a)['color'].mean().backward()
     assert m._sh0.grad is None and m._shs.grad is None
     assert a.vertex_rgb.grad.abs().sum()>0
+
+
+def test_layout_validation_rejects_invalid_keys():
+    from src.vertex_appearance.layout import validate_layout
+    m,c=scene()
+    validate_layout(m)
+    m._vox_key=m.vox_key.clone()
+    m._vox_key[0,0]=m.num_grid_pts
+    with pytest.raises(ValueError,match='out of range'):
+        validate_layout(m)

@@ -57,6 +57,8 @@ def setup(args):
     torch.manual_seed(config['seed'])
     model = SparseVoxelModel(**base['model'])
     model.load(config['geometry_checkpoint'])
+    from .layout import validate_layout
+    validate_layout(model)
     for key in ('_geo_grid_pts', '_sh0', '_shs', '_subdiv_p'):
         getattr(model, key).requires_grad_(False)
     model.freeze_vox_geo()
