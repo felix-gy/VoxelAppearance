@@ -158,6 +158,7 @@ def benchmark(model, module, cameras, output):
                  'raster_start','raster_end','post_end')
         events = {name: torch.cuda.Event(enable_timing=True) for name in names}
         times = []
+        module.to('cuda' if mode == 'vertex' else 'cpu')
         module.eval()
         torch.cuda.reset_peak_memory_stats()
         with torch.no_grad():
@@ -202,6 +203,7 @@ def benchmark(model, module, cameras, output):
                 del result, enc, d
         results['isolated_decoder'] = {k: sum(v)/len(v) for k,v in totals.items()}
     results['layout'] = dict(P=model.num_grid_pts,V=model.num_voxels,
+                            vertices_per_voxel=model.num_grid_pts/model.num_voxels,
                             trainable=sum(p.numel() for p in module.parameters()),
                             parameters_bytes=sum(p.numel()*p.element_size() for p in module.parameters()),
                             vertex_rgb_bytes=12*model.num_grid_pts,

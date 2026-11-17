@@ -126,3 +126,7 @@ resuelto; las modificaciones posteriores del YAML base no alteran su inferencia.
 
 Commit `31d0ac9`: validación estricta de buffers CUDA, configuración efectiva,
 pruebas de render persistente y corrección del protocolo de cámaras.
+
+El benchmark mueve el módulo neuronal a CPU durante las mediciones SH0/SH3,
+para no atribuir su memoria de parámetros a esos baselines. Se mantienen fuera
+de los commits los checkpoints, imágenes y artefactos binarios.
