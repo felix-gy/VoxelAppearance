@@ -134,3 +134,17 @@ de los commits los checkpoints, imágenes y artefactos binarios.
 Dependencias de desarrollo: `python -m pip install -r requirements-dev.txt`.
 El entrenamiento aborta explícitamente ante pérdida o gradientes no finitos.
 Las pruebas adicionales incluyen esquinas geométricas y overfit de dos vistas.
+
+## Batería final
+
+`python -m pytest tests -q`: **15 passed** (2,82 s en el entorno svraster).
+Incluye: Fourier y normalización; gradientes tras inicialización cero; pesos
+trilineales y acumulación; checkpoint incompatible; regresión SH0; invariancia
+de T/depth/normal; diferencias finitas; clamps; guardar/cargar/render; frustum
+vacío y parcial; geometría del orden de esquinas; overfit de una y dos vistas.
+Las advertencias provienen de plugins pytest instalados y del constructor
+MiniCam existente. `git diff --check` sin errores.
+
+Las métricas se calculan sobre imágenes float32 renderizadas; los PNG se
+exportan para inspección. Todos los métodos de la comparación usan ese mismo
+criterio. Los datos, renders, modelos y binarios no forman parte de los commits.
