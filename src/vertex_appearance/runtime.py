@@ -1,5 +1,6 @@
 """Fixed-layout experiment lifecycle shared by training and rendering."""
 import argparse
+import random
 import json
 from pathlib import Path
 import torch
@@ -36,7 +37,23 @@ def setup(args):
     for key in ('steps', 'mode', 'geometry_checkpoint'):
         if getattr(args, key, None) is not None:
             config[key] = getattr(args, key)
-    base = yaml.safe_load(Path(config['base_config']).read_text())
+    if config['mode'] not in ('vertex_trilinear_fourier3', 'vertex_rgb_trilinear'):
+        raise ValueError('Unsupported appearance mode')
+    if config['steps'] < 1 or min(config['validation_interval'], config['checkpoint_interval']) < 1:
+        raise ValueError('Steps and intervals must be positive')
+    expected_appearance = dict(feature_dim=8, frequencies_pi=[1.0,2.0,4.0],
+                               fourier_order='frequency_sin_xyz_cos_xyz',
+                               include_raw_direction=False, direction='camera_to_vertex_world',
+                               layers=[26,64,3], dtype='float32')
+    if config.get('appearance', expected_appearance) != expected_appearance:
+        raise ValueError('This version requires the exact Fourier-3 architecture')
+    config['appearance'] = expected_appearance
+    base = config.get('resolved_base') or yaml.safe_load(Path(config['base_config']).read_text())
+    if base['model']['n_samp_per_vox'] != 1 or base['auto_exposure']['enable']:
+        raise ValueError('Requires one sample and disabled auto exposure')
+    if base['regularizer']['use_l1'] or base['regularizer']['use_huber']:
+        raise ValueError('This materials protocol requires MSE')
+    config['resolved_base'] = base
     torch.manual_seed(config['seed'])
     model = SparseVoxelModel(**base['model'])
     model.load(config['geometry_checkpoint'])
@@ -91,10 +108,17 @@ def train(args):
     if args.resume:
         start = load_checkpoint(args.resume, module, identity, optimizer, generator)['step']
     cameras = pack.get_train_cameras()
+    # Match the baseline: shuffled complete epochs, never sample with replacement.
+    camera_order = []
+    camera_random = random.Random(config['seed'])
+    while len(camera_order) < config['steps']:
+        epoch = list(range(len(cameras)))
+        camera_random.shuffle(epoch)
+        camera_order.extend(epoch)
     torch.cuda.reset_peak_memory_stats()
     for step in range(start+1, config['steps']+1):
         module.train()
-        cam = cameras[torch.randint(len(cameras), (), generator=generator).item()]
+        cam = cameras[camera_order[step-1]]
         optimizer.zero_grad(set_to_none=True)
         image = model.render_vertex(cam, module)['color']
         gt = cam.image.cuda()

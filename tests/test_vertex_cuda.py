@@ -75,3 +75,37 @@ def test_decoder_overfit():
         opt.step()
         losses.append(loss.item())
     assert losses[-1]<losses[0]
+
+
+def test_constant_residual_matches_constant_sh_color():
+    m,c=scene()
+    a=VertexRGB(m.num_grid_pts).cuda()
+    a.vertex_rgb.data.fill_(0.1)
+    actual=m.render_vertex(c,a)['color']
+    m._sh0.fill_(0.1/0.28209479177387814)
+    expected=m.render(c,color_mode='sh0')['color']
+    torch.testing.assert_close(actual,expected,atol=1e-5,rtol=0)
+
+
+def test_color_clamp_has_zero_gradient():
+    m,c=scene()
+    a=VertexRGB(m.num_grid_pts).cuda()
+    a.vertex_rgb.data.fill_(-1)
+    m.render_vertex(c,a)['color'].sum().backward()
+    assert a.vertex_rgb.grad.count_nonzero()==0
+
+
+def test_checkpoint_preserves_render(tmp_path):
+    from src.vertex_appearance.checkpoint import save_checkpoint,load_checkpoint,layout_fingerprint
+    m,c=scene()
+    a=VertexAppearance(m.num_grid_pts).cuda()
+    a.decoder[-1].weight.data.normal_(0,0.01)
+    opt=torch.optim.Adam(a.parameters())
+    generator=torch.Generator().manual_seed(3)
+    identity={'layout':layout_fingerprint(m)}
+    path=tmp_path/'state.pt'
+    expected=m.render_vertex(c,a)['color'].detach()
+    save_checkpoint(path,a,opt,1,{'mode':'vertex_trilinear_fourier3'},identity,generator)
+    other=VertexAppearance(m.num_grid_pts).cuda()
+    load_checkpoint(path,other,identity)
+    torch.testing.assert_close(m.render_vertex(c,other)['color'],expected,atol=1e-5,rtol=0)

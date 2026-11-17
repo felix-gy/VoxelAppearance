@@ -699,14 +699,19 @@ rasterize_voxels_backward(
     if (vox_centers.ndimension() != 2 || vox_centers.size(1) != 3)
         AT_ERROR("vox_centers must have dimensions (num_points, 3)");
 
+    TORCH_CHECK(rgbs.is_cuda() && rgbs.scalar_type() == torch::kFloat32 && rgbs.is_contiguous(), "Expected contiguous float32 CUDA RGB buffer");
+    TORCH_CHECK(rgbs.dim() == 2 && rgbs.size(0) == vox_centers.size(0) && rgbs.size(1) == 27, "Expected RGB [V,27]");
+    TORCH_CHECK(geos.is_cuda() && geos.scalar_type() == torch::kFloat32 && geos.is_contiguous(), "Expected contiguous float32 CUDA geometry");
+    TORCH_CHECK(geos.dim() == 2 && geos.size(0) == vox_centers.size(0) && geos.size(1) == 8, "Expected geometry [V,8]");
+    TORCH_CHECK(rgbs.device() == geos.device() && rgbs.device() == vox_centers.device(), "Device mismatch");
     TORCH_CHECK(n_samp_per_vox == 1, "Vertex appearance requires one sample");
     const int P = vox_centers.size(0);
 
     if (P == 0)
     {
-        torch::Tensor dL_dgeos = torch::empty({0});
-        torch::Tensor dL_drgbs = torch::empty({0});
-        torch::Tensor subdiv_p_bw = torch::empty({0});
+        torch::Tensor dL_dgeos = torch::zeros_like(geos);
+        torch::Tensor dL_drgbs = torch::zeros_like(rgbs);
+        torch::Tensor subdiv_p_bw = torch::zeros({0,1}, geos.options());
         return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw);
     }
 

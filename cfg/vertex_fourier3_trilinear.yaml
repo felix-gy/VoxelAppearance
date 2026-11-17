@@ -7,3 +7,11 @@ validation_interval: 500
 checkpoint_interval: 1000
 lr_vertex_features: 0.01
 lr_mlp: 0.001
+appearance:
+  feature_dim: 8
+  frequencies_pi: [1.0, 2.0, 4.0]
+  fourier_order: frequency_sin_xyz_cos_xyz
+  include_raw_direction: false
+  direction: camera_to_vertex_world
+  layers: [26, 64, 3]
+  dtype: float32

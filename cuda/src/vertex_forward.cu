@@ -772,6 +772,11 @@ rasterize_voxels(
     if (vox_centers.size(0) != rgbs.size(0))
         AT_ERROR("size mismatch");
 
+    TORCH_CHECK(rgbs.is_cuda() && rgbs.scalar_type() == torch::kFloat32 && rgbs.is_contiguous(), "Expected contiguous float32 CUDA RGB buffer");
+    TORCH_CHECK(rgbs.dim() == 2 && rgbs.size(0) == vox_centers.size(0) && rgbs.size(1) == 27, "Expected RGB [V,27]");
+    TORCH_CHECK(geos.is_cuda() && geos.scalar_type() == torch::kFloat32 && geos.is_contiguous(), "Expected contiguous float32 CUDA geometry");
+    TORCH_CHECK(geos.dim() == 2 && geos.size(0) == vox_centers.size(0) && geos.size(1) == 8, "Expected geometry [V,8]");
+    TORCH_CHECK(rgbs.device() == geos.device() && rgbs.device() == vox_centers.device(), "Device mismatch");
     TORCH_CHECK(n_samp_per_vox == 1, "Vertex appearance requires one sample");
     const int P = vox_centers.size(0);
     const int H = image_height;

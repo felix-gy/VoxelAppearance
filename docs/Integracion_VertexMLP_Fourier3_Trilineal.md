@@ -75,3 +75,23 @@ prueba de funcionamiento, no el resultado final del experimento.
 
 Se produjo OOM al solapar accidentalmente evaluación y debug en dos procesos;
 se repitió el debug con GPU libre. No se cambió precisión ni algoritmo.
+
+## Validaciones ampliadas y commits
+
+Tras recompilar las comprobaciones de entrada CUDA: **11 pruebas aprobadas**.
+Se cubren además RGB constante frente a SH, gradiente cero bajo clamp y
+persistencia de la imagen. Se conserva el protocolo de épocas completas
+barajadas, con secuencia reproducible desde semilla y paso al reanudar.
+
+Commits locales iniciales:
+- `50610e7`: decoder Fourier y guía.
+- `8a43a40`: forward/backward CUDA y regresiones.
+- `11abc56`: entrenamiento, persistencia, evaluación e instrumentación.
+
+## Límites
+
+La continuidad garantizada es la del residual entre vóxeles conformes con
+vértices compartidos. No se garantiza continuidad en interfaces adaptativas ni
+en el color total si cambia SH0 entre vóxeles. Los resultados dependen del
+checkpoint geométrico congelado. No se soportan AMP, más de una muestra,
+regularizadores CUDA ni actualización de topología en el modo neuronal.
