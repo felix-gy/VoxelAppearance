@@ -109,6 +109,7 @@ class SVRenderer:
         ###################################
         # Pre-processing
         ###################################
+        profile_events = other_opt.pop("profile_events", None)
         if ss is None:
             ss = self.ss
         w_src, h_src = camera.image_width, camera.image_height
@@ -140,6 +141,8 @@ class SVRenderer:
             need_normal=output_normal,
             track_max_w=track_max_w,
             **other_opt)
+        if profile_events is not None:
+            profile_events["raster_start"].record()
         color, depth, normal, T, max_w = svraster_cuda.renderer.rasterize_voxels(
             raster_settings,
             self.octpath,
@@ -150,6 +153,8 @@ class SVRenderer:
         ###################################
         # Post-processing and pack output
         ###################################
+        if profile_events is not None:
+            profile_events["raster_end"].record()
         if rand_bg:
             color = color + T * torch.rand_like(color, requires_grad=False)
         elif not self.white_background and not self.black_background:
@@ -176,6 +181,8 @@ class SVRenderer:
         # Clip intensity
         render_pkg['color'] = render_pkg['color'].clamp(0, 1)
 
+        if profile_events is not None:
+            profile_events["post_end"].record()
         return render_pkg
 
     def render_vertex(self, camera, vertex_module, **options):
@@ -183,8 +190,15 @@ class SVRenderer:
         if options.get("color_mode") not in (None, "sh0"):
             raise ValueError("Vertex appearance requires SH0 base")
         options.pop("color_mode", None)
+        events = options.get("profile_events")
+        if events is not None:
+            events["appearance_start"].record()
         delta = vertex_module(self.grid_pts_xyz, camera.c2w[:3, 3])
+        if events is not None:
+            events["appearance_end"].record()
         packed = delta[self.vox_key].reshape(self.num_voxels, 24)
+        if events is not None:
+            events["gather_end"].record()
         def vertex_vox_fn(idx, cam_pos, color_mode):
             params = self.vox_fn(idx, cam_pos, "sh0")
             params["rgbs"] = torch.cat((params["rgbs"], packed), dim=1).contiguous()

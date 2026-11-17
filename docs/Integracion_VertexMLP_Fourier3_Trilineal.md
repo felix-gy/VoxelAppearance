@@ -53,3 +53,25 @@ python render_vertex_fourier3.py --output output/vertex_materials/eval --appeara
 
 El control usa `--mode vertex_rgb_trilinear`. La ruta original sigue disponible
 mediante `render.py`; los checkpoints geométricos no se reescriben. No hay push.
+
+## Entrenamiento y persistencia implementados
+
+- `runtime.py`: configuración YAML específica, carga del protocolo base,
+  congelación, Adam, selección reproducible de cámaras, evaluación y medición.
+  Se usa un diccionario YAML en lugar de ampliar el estado global YACS, para
+  aislar completamente el experimento del entrenamiento adaptativo original.
+- `checkpoint.py`: SHA-256 del archivo base, hash de layout/orden/coordenadas,
+  estado neuronal, Adam y estados aleatorios CPU/CUDA/cámaras. La carga rechaza
+  identidades incompatibles y permite reubicar el checkpoint base.
+- Scripts raíz separados para entrenar y renderizar; control con RGB libre.
+- El instrumento de tiempos distingue raster (incluye preprocesamiento y
+  empaquetado SH0), posprocesamiento, apariencia y gather. Fourier y MLP se
+  miden además aisladamente. El total siempre incluye todas esas operaciones.
+
+Prueba real de dos pasos: 200 vistas test evaluadas, PSNR 23.48459,
+SSIM 0.900107, LPIPS 0.077448 y LPIPS corregido 0.091256.
+Pico asignado durante esta prueba: 5.470.391.296 bytes. Estos valores son una
+prueba de funcionamiento, no el resultado final del experimento.
+
+Se produjo OOM al solapar accidentalmente evaluación y debug en dos procesos;
+se repitió el debug con GPU libre. No se cambió precisión ni algoritmo.

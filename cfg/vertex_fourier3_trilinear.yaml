@@ -1,0 +1,9 @@
+geometry_checkpoint: out/materials_t/checkpoints/iter020000_model.pt
+base_config: out/materials_t/config.yaml
+mode: vertex_trilinear_fourier3
+seed: 3721
+steps: 5000
+validation_interval: 500
+checkpoint_interval: 1000
+lr_vertex_features: 0.01
+lr_mlp: 0.001
