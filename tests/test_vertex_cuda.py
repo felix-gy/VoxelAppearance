@@ -152,3 +152,13 @@ def test_two_view_overfit():
         losses.append(loss.item())
     assert losses[-1]<losses[0]
     assert not torch.allclose(a(m.grid_pts_xyz,c.position),a(m.grid_pts_xyz,c2.position))
+
+
+def test_wrapper_never_trains_base_sh():
+    m,c=scene()
+    m._sh0.requires_grad_(True)
+    m._shs.requires_grad_(True)
+    a=VertexRGB(m.num_grid_pts).cuda()
+    m.render_vertex(c,a)['color'].mean().backward()
+    assert m._sh0.grad is None and m._shs.grad is None
+    assert a.vertex_rgb.grad.abs().sum()>0

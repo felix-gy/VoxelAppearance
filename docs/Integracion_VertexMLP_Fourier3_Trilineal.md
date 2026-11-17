@@ -148,3 +148,7 @@ MiniCam existente. `git diff --check` sin errores.
 Las métricas se calculan sobre imágenes float32 renderizadas; los PNG se
 exportan para inspección. Todos los métodos de la comparación usan ese mismo
 criterio. Los datos, renders, modelos y binarios no forman parte de los commits.
+
+El wrapper desacopla explícitamente geometría, prioridad y SH0 de autograd,
+aunque el llamador no haya congelado antes el modelo; solo el residual recibe
+gradientes. Rechaza multimuestreo antes de evaluar la MLP.

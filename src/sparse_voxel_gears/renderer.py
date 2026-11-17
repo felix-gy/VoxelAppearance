@@ -190,6 +190,8 @@ class SVRenderer:
         if options.get("color_mode") not in (None, "sh0"):
             raise ValueError("Vertex appearance requires SH0 base")
         options.pop("color_mode", None)
+        if options.get("n_samp_per_vox", self.n_samp_per_vox) != 1:
+            raise ValueError("Vertex appearance requires one sample")
         events = options.get("profile_events")
         if events is not None:
             events["appearance_start"].record()
@@ -201,7 +203,9 @@ class SVRenderer:
             events["gather_end"].record()
         def vertex_vox_fn(idx, cam_pos, color_mode):
             params = self.vox_fn(idx, cam_pos, "sh0")
-            params["rgbs"] = torch.cat((params["rgbs"], packed), dim=1).contiguous()
+            params["geos"] = params["geos"].detach()
+            params["subdiv_p"] = params["subdiv_p"].detach()
+            params["rgbs"] = torch.cat((params["rgbs"].detach(), packed), dim=1).contiguous()
             return params
         return self.render(camera, color_mode="sh0", appearance_mode="vertex_trilinear",
                            vertex_vox_fn=vertex_vox_fn, **options)
