@@ -95,3 +95,34 @@ vértices compartidos. No se garantiza continuidad en interfaces adaptativas ni
 en el color total si cambia SH0 entre vóxeles. Los resultados dependen del
 checkpoint geométrico congelado. No se soportan AMP, más de una muestra,
 regularizadores CUDA ni actualización de topología en el modo neuronal.
+
+## Protocolo definitivo
+
+El debug inicial usó selección con reemplazo. Se corrigió a épocas barajadas
+como el baseline y se inició una corrida definitiva independiente desde cero,
+`output/vertex_materials_final`, para comparar de forma consistente con el
+control `output/vertex_materials_control`. Los runs smoke/debug y de reanudación
+no se usarán como resultados finales. El debug de 1000 pasos llegó a un pico
+asignado de 5.530.730.496 bytes.
+
+## Inventario de interfaces y archivos
+
+| Grupo | Archivos | Implicación |
+|---|---|---|
+| Decoder | `src/vertex_appearance/{__init__,decoder}.py` | Fourier y módulos entrenables independientes |
+| Persistencia | `src/vertex_appearance/checkpoint.py` | Nuevo schema v2; no modifica SVInOut |
+| Experimento | `src/vertex_appearance/runtime.py` | Config propia, training, evaluación y benchmark |
+| Entradas | `train_vertex_fourier3.py`, `render_vertex_fourier3.py` | Nuevas CLI, no cambia train.py |
+| Configuración | `cfg/vertex_fourier3_trilinear.yaml` | Parámetros del protocolo y arquitectura |
+| Renderer | `src/sparse_voxel_gears/renderer.py` | Nuevo render_vertex, profiling opcional; color_mode preservado |
+| Autograd | `cuda/svraster_cuda/renderer.py` | Dispatch de modo y gradiente RGB empaquetado |
+| Kernels | `cuda/src/vertex_{forward,backward}.{cu,h}` | Interpolación y backward nuevos, recompilación requerida |
+| Extensión | `cuda/binding.cpp`, `cuda/setup.py` | Exporta y compila kernels adicionales |
+| Tests | `tests/test_{fourier3,trilinear_reference,vertex_checkpoint,vertex_cuda}.py` | Referencias, regresiones y diferenciación |
+
+Para medir: añadir `--benchmark` al comando de render con checkpoint.
+Los checkpoints guardan las frecuencias, convención angular y protocolo base
+resuelto; las modificaciones posteriores del YAML base no alteran su inferencia.
+
+Commit `31d0ac9`: validación estricta de buffers CUDA, configuración efectiva,
+pruebas de render persistente y corrección del protocolo de cámaras.

@@ -21,3 +21,13 @@ def test_initialization_and_two_steps():
         (m(xyz, torch.zeros(3))-1).square().mean().backward()
         opt.step()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum()>0 for p in m.parameters())
+
+
+def test_normalized_directions_and_camera_dependence():
+    torch.manual_seed(7)
+    m=VertexAppearance(2)
+    m.decoder[-1].weight.data.normal_()
+    xyz=torch.tensor([[1.,2.,3.],[-1.,2.,3.]])
+    zero=torch.zeros(3)
+    torch.testing.assert_close(m(xyz,zero),m(xyz*2,zero))
+    assert not torch.allclose(m(xyz,zero),m(xyz,torch.ones(3)))

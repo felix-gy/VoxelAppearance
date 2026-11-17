@@ -109,3 +109,20 @@ def test_checkpoint_preserves_render(tmp_path):
     other=VertexAppearance(m.num_grid_pts).cuda()
     load_checkpoint(path,other,identity)
     torch.testing.assert_close(m.render_vertex(c,other)['color'],expected,atol=1e-5,rtol=0)
+
+
+def test_empty_frustum_and_partial_visibility():
+    m,c=scene()
+    a=VertexRGB(m.num_grid_pts).cuda()
+    # Rotate around y: all geometry lies behind this camera.
+    c.c2w[:3,:3]=torch.diag(torch.tensor([-1.,1.,-1.],device='cuda'))
+    c.w2c=c.c2w.inverse()
+    out=m.render_vertex(c,a,output_T=True)
+    torch.testing.assert_close(out['T'],torch.ones_like(out['T']))
+    out['color'].sum().backward()
+    assert a.vertex_rgb.grad.count_nonzero()==0
+    c.c2w[:3,:3]=torch.eye(3,device='cuda')
+    c.c2w[0,3]=1.5
+    c.w2c=c.c2w.inverse()
+    ref=m.render(c,color_mode='sh0')['color']
+    torch.testing.assert_close(m.render_vertex(c,a)['color'],ref,atol=1e-5,rtol=0)
