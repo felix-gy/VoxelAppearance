@@ -152,3 +152,31 @@ criterio. Los datos, renders, modelos y binarios no forman parte de los commits.
 El wrapper desacopla explícitamente geometría, prioridad y SH0 de autograd,
 aunque el llamador no haya congelado antes el modelo; solo el residual recibe
 gradientes. Rechaza multimuestreo antes de evaluar la MLP.
+
+## Resultados finales Vertex-MLP (5000 pasos)
+
+RTX 3060, ss=1.5, 200 vistas test, geometría materials_t fija.
+
+| Método | PSNR | SSIM | LPIPS corregido | FPS total |
+|---|---:|---:|---:|---:|
+| SH0 original | 23.65449 | 0.901724 | 0.091297 | 99.76 |
+| SH3 original | 29.96786 | 0.954652 | 0.043374 | 81.26 |
+| Vertex-MLP Fourier-3 | 27.89134 | 0.935391 | 0.072690 | 16.80 |
+
+La variante mejora SH0 en 4.24 dB, pero queda 2.08 dB por debajo de SH3 y
+resulta más lenta. Este experimento no demuestra una ventaja frente a SH3.
+Latencia total 59.52 ms: apariencia 43.50 ms, gather 2.26 ms,
+raster/preprocesamiento 13.49 ms, posprocesamiento 0.25 ms.
+Mediciones aisladas: Fourier/direcciones 7.30 ms y MLP/concatenación 36.19 ms.
+Los tiempos usan 10 vistas de calentamiento y 50 mediciones de vistas test.
+
+Pico asignado de entrenamiento: 5.531.939.328 bytes. Pico de inferencia:
+4.117.459.968 bytes para Vertex-MLP frente a 1.508.395.008 para SH0/SH3.
+Checkpoint: `output/vertex_materials_final/checkpoints/iter005000_appearance.pt`.
+Métricas y PNG: `output/vertex_materials_final/comparison/`.
+Tiempos: `output/vertex_materials_final/benchmark/benchmark.json`.
+
+Batería tras reforzar aislamiento de gradientes: **16 passed**, 2.90 s.
+Commits adicionales: `e372eee` (visibilidad/documentación), `0673d8f`
+(memoria baseline), `f86857e` (dos vistas/dependencias), `3295343`
+(resultados de pruebas), `31d942f` (aislamiento de gradientes del baseline).
