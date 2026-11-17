@@ -126,3 +126,29 @@ def test_empty_frustum_and_partial_visibility():
     c.w2c=c.c2w.inverse()
     ref=m.render(c,color_mode='sh0')['color']
     torch.testing.assert_close(m.render_vertex(c,a)['color'],ref,atol=1e-5,rtol=0)
+
+
+def test_layout_matches_kernel_corner_order():
+    m,c=scene()
+    bits=torch.tensor([[k>>2,(k>>1)&1,k&1] for k in range(8)],device='cuda',dtype=torch.float32)
+    expected=m.vox_center[:,None,:]+(bits[None,:,:]-0.5)*m.vox_size[:,None,:]
+    torch.testing.assert_close(m.grid_pts_xyz[m.vox_key],expected,atol=1e-6,rtol=0)
+
+
+def test_two_view_overfit():
+    m,c=scene()
+    c2=c.clone_mini()
+    c2.c2w[0,3]=0.3
+    c2.w2c=c2.c2w.inverse()
+    a=VertexAppearance(m.num_grid_pts).cuda()
+    opt=torch.optim.Adam(a.parameters(),lr=0.01)
+    losses=[]
+    for _ in range(12):
+        opt.zero_grad()
+        loss=sum((m.render_vertex(cam,a)['color']-target).square().mean()
+                 for cam,target in ((c,0.7),(c2,0.5)))
+        loss.backward()
+        opt.step()
+        losses.append(loss.item())
+    assert losses[-1]<losses[0]
+    assert not torch.allclose(a(m.grid_pts_xyz,c.position),a(m.grid_pts_xyz,c2.position))

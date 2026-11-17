@@ -130,3 +130,7 @@ pruebas de render persistente y corrección del protocolo de cámaras.
 El benchmark mueve el módulo neuronal a CPU durante las mediciones SH0/SH3,
 para no atribuir su memoria de parámetros a esos baselines. Se mantienen fuera
 de los commits los checkpoints, imágenes y artefactos binarios.
+
+Dependencias de desarrollo: `python -m pip install -r requirements-dev.txt`.
+El entrenamiento aborta explícitamente ante pérdida o gradientes no finitos.
+Las pruebas adicionales incluyen esquinas geométricas y overfit de dos vistas.

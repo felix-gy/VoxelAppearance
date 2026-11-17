@@ -123,6 +123,8 @@ def train(args):
         image = model.render_vertex(cam, module)['color']
         gt = cam.image.cuda()
         loss = l2_loss(image, gt) + base['regularizer']['lambda_ssim'] * fast_ssim_loss(image, gt)
+        if not torch.isfinite(loss):
+            raise RuntimeError("Nonfinite photometric loss")
         loss.backward()
         if not all(p.grad is None or torch.isfinite(p.grad).all() for p in module.parameters()):
             raise RuntimeError('Nonfinite appearance gradient')
