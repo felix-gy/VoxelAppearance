@@ -523,9 +523,9 @@ renderCUDA(
             #pragma unroll
             for (int iii=0; iii<8; ++iii)
                 grad_pack[iii] = dL_dgeo_params[iii];
-            grad_pack[8] = dL_drgb[0];
-            grad_pack[9] = dL_drgb[1];
-            grad_pack[10] = dL_drgb[2];
+            grad_pack[8] = mask[0] * dL_drgb[0];
+            grad_pack[9] = mask[1] * dL_drgb[1];
+            grad_pack[10] = mask[2] * dL_drgb[2];
             grad_pack[11] = fabs(dL_dalpha * alpha);
 
             const int base_id = cg::this_grid().thread_rank();

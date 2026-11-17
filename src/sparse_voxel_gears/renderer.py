@@ -185,7 +185,7 @@ class SVRenderer:
             profile_events["post_end"].record()
         return render_pkg
 
-    def render_vertex(self, camera, vertex_module, **options):
+    def render_vertex(self, camera, vertex_module, joint_training=False, **options):
         """Render fixed geometry with per-vertex residual appearance."""
         if options.get("color_mode") not in (None, "sh0"):
             raise ValueError("Vertex appearance requires SH0 base")
@@ -203,9 +203,9 @@ class SVRenderer:
             events["gather_end"].record()
         def vertex_vox_fn(idx, cam_pos, color_mode):
             params = self.vox_fn(idx, cam_pos, "sh0")
-            params["geos"] = params["geos"].detach()
-            params["subdiv_p"] = params["subdiv_p"].detach()
-            params["rgbs"] = torch.cat((params["rgbs"].detach(), packed), dim=1).contiguous()
+            if not joint_training:
+                params = {key: value.detach() for key, value in params.items()}
+            params["rgbs"] = torch.cat((params["rgbs"], packed), dim=1).contiguous()
             return params
         return self.render(camera, color_mode="sh0", appearance_mode="vertex_trilinear",
                            vertex_vox_fn=vertex_vox_fn, **options)

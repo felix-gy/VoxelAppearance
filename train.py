@@ -78,7 +78,13 @@ def training(args):
         suggested_bounding=data_pack.suggested_bounding)
 
     # Init voxel model
-    voxel_model = SparseVoxelModel(
+    model_class = SparseVoxelModel
+    if args.appearance_mode == 'vertex_mlp':
+        from src.vertex_appearance.joint import JointVoxelModel
+        model_class = JointVoxelModel
+        if cfg.model.n_samp_per_vox != 1 or args.save_quantized:
+            raise ValueError('Vertex joint mode requires one sample and float32 checkpoints')
+    voxel_model = model_class(
         n_samp_per_vox=cfg.model.n_samp_per_vox,
         sh_degree=cfg.model.sh_degree,
         ss=cfg.model.ss,
@@ -103,7 +109,19 @@ def training(args):
             cameras=tr_cams,
         )
 
-    first_iter = loaded_iter if loaded_iter else 1
+    joint = args.appearance_mode == 'vertex_mlp'
+    if joint:
+        if not loaded_iter:
+            config_path = os.path.join(args.model_path, 'config.yaml')
+            # main() writes the unscaled config before applying sche_mult.
+            if os.path.isfile(config_path):
+                with open(config_path) as config_file:
+                    voxel_model.joint_config = config_file.read()
+            else:
+                voxel_model.joint_config = cfg.dump()
+        if not loaded_iter and cfg.init.sh_degree_init > 0:
+            voxel_model.activate_vertex()
+    first_iter = (loaded_iter + 1 if loaded_iter else 1) if joint else (loaded_iter if loaded_iter else 1)
     print(f"Start optmization from iters={first_iter}.")
 
     # Init optimizer
@@ -113,7 +131,7 @@ def training(args):
             [
                 {'params': [voxel_model._geo_grid_pts], 'lr': cfg.optimizer.geo_lr},
                 {'params': [voxel_model._sh0], 'lr': cfg.optimizer.sh0_lr},
-                {'params': [voxel_model._shs], 'lr': cfg.optimizer.shs_lr},
+                {'params': voxel_model.angular_parameters() if joint else [voxel_model._shs], 'lr': cfg.optimizer.shs_lr},
             ],
             betas=(cfg.optimizer.optim_beta1, cfg.optimizer.optim_beta2),
             eps=cfg.optimizer.optim_eps)
@@ -125,7 +143,7 @@ def training(args):
         return optimizer, scheduler
 
     optimizer, scheduler = create_trainer()
-    if loaded_iter and args.load_optimizer:
+    if loaded_iter and args.load_optimizer and not joint:
         optim_ckpt = torch.load(os.path.join(args.model_path, "optim.pt"))
         optimizer.load_state_dict(optim_ckpt['optim'])
         scheduler.load_state_dict(optim_ckpt['sched'])
@@ -145,6 +163,17 @@ def training(args):
         'rand_bg': cfg.regularizer.rand_bg,
         'use_auto_exposure': cfg.auto_exposure.enable,
     }
+
+    if joint and loaded_iter:
+        from src.vertex_appearance.joint import restore_training
+        state = voxel_model.joint_training_state
+        if state is None or state['iteration'] != loaded_iter:
+            raise ValueError('Checkpoint does not contain matching joint training state')
+        if len(state['camera_order']) < cfg.procedure.n_iter:
+            raise ValueError('Resume must preserve the original total iteration count')
+        tr_cam_indices = state['camera_order']
+        tr_render_opt.update(state['render_options'])
+        restore_training(state, optimizer, scheduler)
 
     sparse_depth_loss = loss_utils.SparseDepthLoss(
         iter_end=cfg.regularizer.sparse_depth_until)
@@ -176,7 +205,13 @@ def training(args):
 
         # Increase the degree of SH by one up to a maximum degree
         if iteration % 1000 == 0:
-            voxel_model.sh_degree_add1()
+            if joint:
+                if voxel_model.vertex_module is None and voxel_model.max_sh_degree > 0:
+                    voxel_model.activate_vertex()
+                    optimizer.param_groups[2]['params'] = voxel_model.angular_parameters()
+                    optimizer.state.pop(voxel_model._shs, None)
+            else:
+                voxel_model.sh_degree_add1()
 
         # Recompute sh from cameras
         if iteration in cfg.procedure.reset_sh_ckpt:
@@ -404,6 +439,10 @@ def training(args):
                 ema_psnr=ema_psnr_for_log)
 
             if iteration in args.checkpoint_iterations or iteration == cfg.procedure.n_iter:
+                if joint:
+                    from src.vertex_appearance.joint import training_state
+                    voxel_model.joint_training_state = training_state(
+                        optimizer, scheduler, iteration, tr_cam_indices, tr_render_opt)
                 voxel_model.save_iteration(args.model_path, iteration, quantize=args.save_quantized)
                 if args.save_optimizer:
                     torch.save(
@@ -551,6 +590,7 @@ if __name__ == "__main__":
         "You can specify a list of config files to overwrite the default setups."
         "All config fields can also be overwritten by command line.")
     parser.add_argument('--model_path')
+    parser.add_argument('--appearance_mode', choices=['sh', 'vertex_mlp'], default='sh')
     parser.add_argument('--cfg_files', default=[], nargs='*')
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="*", type=int, default=[-1])
@@ -563,7 +603,15 @@ if __name__ == "__main__":
     args, cmd_lst = parser.parse_known_args()
 
     # Update config from files and command line
-    update_config(args.cfg_files, cmd_lst)
+    if args.appearance_mode == 'vertex_mlp' and args.load_iteration is not None:
+        if args.cfg_files or cmd_lst:
+            raise ValueError('Joint resume uses its saved config; omit config overrides')
+        path = os.path.join(args.model_path, 'checkpoints', f'iter{args.load_iteration:06d}_model.pt')
+        saved = torch.load(path, map_location='cpu', weights_only=False)
+        from yacs.config import CfgNode
+        cfg.merge_from_other_cfg(CfgNode.load_cfg(saved['vertex_joint']['config']))
+    else:
+        update_config(args.cfg_files, cmd_lst)
 
     # Global init
     seed_everything(cfg.procedure.seed)

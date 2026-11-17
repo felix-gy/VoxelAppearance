@@ -56,8 +56,6 @@ def rasterize_voxels(
     if raster_settings.appearance_mode == "vertex_trilinear":
         if raster_settings.n_samp_per_vox != 1:
             raise ValueError("Vertex appearance requires one sample")
-        if any((raster_settings.lambda_R_concen, raster_settings.lambda_ascending, raster_settings.lambda_dist)):
-            raise ValueError("Vertex appearance does not support CUDA regularizers")
     N = octree_paths.numel()
     device = octree_paths.device
     if vox_centers.shape[0] != N or vox_lengths.numel() != N:
