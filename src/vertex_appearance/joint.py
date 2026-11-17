@@ -27,6 +27,21 @@ class JointVoxelModel(SparseVoxelModel):
             self.vertex_module = VertexAppearance(self.num_grid_pts).cuda()
         self.active_sh_degree = 0
         self._shs.requires_grad_(False)
+        self._shs.grad = None
+        return True
+
+    def activate_for_optimizer(self, optimizer):
+        """Replace the angular group without restarting its warmup bias clock."""
+        if not self.activate_vertex():
+            return False
+        previous = optimizer.state.pop(self._shs, {})
+        parameters = self.angular_parameters()
+        optimizer.param_groups[2]['params'] = parameters
+        for parameter in parameters:
+            optimizer.state[parameter] = dict(
+                step=int(previous.get('step', 0)),
+                exp_avg=torch.zeros_like(parameter),
+                exp_avg_sq=torch.zeros_like(parameter))
         return True
 
     def angular_parameters(self):
@@ -100,6 +115,7 @@ class JointVoxelModel(SparseVoxelModel):
             if os.path.exists(temporary):
                 os.unlink(temporary)
         self.latest_save_path = path
+        self.joint_training_state = None
 
     def load(self, path):
         payload = torch.load(path, map_location='cpu', weights_only=False)

@@ -174,6 +174,8 @@ def training(args):
         tr_cam_indices = state['camera_order']
         tr_render_opt.update(state['render_options'])
         restore_training(state, optimizer, scheduler)
+        voxel_model.joint_training_state = None
+        del state
 
     sparse_depth_loss = loss_utils.SparseDepthLoss(
         iter_end=cfg.regularizer.sparse_depth_until)
@@ -207,9 +209,7 @@ def training(args):
         if iteration % 1000 == 0:
             if joint:
                 if voxel_model.vertex_module is None and voxel_model.max_sh_degree > 0:
-                    voxel_model.activate_vertex()
-                    optimizer.param_groups[2]['params'] = voxel_model.angular_parameters()
-                    optimizer.state.pop(voxel_model._shs, None)
+                    voxel_model.activate_for_optimizer(optimizer)
             else:
                 voxel_model.sh_degree_add1()
 

@@ -133,9 +133,10 @@ def test_real_trainer_boundary_adaptation_and_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(train,'training_report',lambda **kwargs:None)
     args=Namespace(appearance_mode='vertex_mlp',load_iteration=None,model_path=str(tmp_path),
                    load_optimizer=False,save_optimizer=False,save_quantized=False,
-                   checkpoint_iterations=[999,1000,1001],test_iterations=[],pg_view_every=0)
+                   checkpoint_iterations=[1,999,1000,1001],test_iterations=[],pg_view_every=0)
     seed_everything(3721)
     train.training(args)
+    initial=torch.load(tmp_path/'checkpoints/iter000001_model.pt',map_location='cpu',weights_only=False)
     before=torch.load(tmp_path/'checkpoints/iter000999_model.pt',map_location='cpu',weights_only=False)
     after=torch.load(tmp_path/'checkpoints/iter001000_model.pt',map_location='cpu',weights_only=False)
     expected=torch.load(tmp_path/'checkpoints/iter001501_model.pt',map_location='cpu',weights_only=False)
@@ -163,5 +164,26 @@ def test_real_trainer_boundary_adaptation_and_resume(tmp_path, monkeypatch):
     seed_everything(3721)
     train.training(args)
     baseline=torch.load(tmp_path/'original/checkpoints/iter000999_model.pt',map_location='cpu',weights_only=False)
+    baseline_initial=torch.load(tmp_path/'original/checkpoints/iter000001_model.pt',map_location='cpu',weights_only=False)
     for key in ('octpath','octlevel','_geo_grid_pts','_sh0','_shs'):
-        torch.testing.assert_close(before[key],baseline[key],atol=1e-5,rtol=1e-5)
+        torch.testing.assert_close(initial[key],baseline_initial[key],atol=1e-5,rtol=1e-5)
+    # CUDA atomic accumulation is not bitwise deterministic over 999 updates.
+    for key in ('octpath','octlevel','_shs'):
+        torch.testing.assert_close(before[key],baseline[key],atol=0,rtol=0)
+
+
+def test_angular_replacement_preserves_optimizer_clock():
+    from svraster_cuda.sparse_adam import SparseAdam
+    m,c=joint_scene()
+    opt=SparseAdam([{'params':[m._geo_grid_pts],'lr':0.025},
+                    {'params':[m._sh0],'lr':0.01},
+                    {'params':[m._shs],'lr':0.00025}],betas=(0.1,0.99),eps=1e-15)
+    opt.state[m._shs]=dict(step=999,exp_avg=torch.zeros_like(m._shs),exp_avg_sq=torch.zeros_like(m._shs))
+    assert m.activate_for_optimizer(opt)
+    assert m._shs not in opt.state
+    assert opt.param_groups[2]['lr']==0.00025
+    for parameter in m.vertex_module.parameters():
+        assert opt.state[parameter]['step']==999
+        assert opt.state[parameter]['exp_avg'].count_nonzero()==0
+        assert opt.state[parameter]['exp_avg_sq'].count_nonzero()==0
+    assert not m.activate_for_optimizer(opt)
