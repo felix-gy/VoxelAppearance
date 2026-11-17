@@ -13,6 +13,8 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include "src/raster_state.h"
 #include "src/preprocess.h"
 #include "src/forward.h"
+#include "src/vertex_forward.h"
+#include "src/vertex_backward.h"
 #include "src/backward.h"
 #include "src/sh_compute.h"
 #include "src/tv_compute.h"
@@ -22,6 +24,8 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("rasterize_vertex", &FORWARD_VERTEX::rasterize_voxels);
+    m.def("rasterize_vertex_backward", &BACKWARD_VERTEX::rasterize_voxels_backward);
     m.def("rasterize_preprocess", &PREPROCESS::rasterize_preprocess);
     m.def("rasterize_voxels", &FORWARD::rasterize_voxels);
     m.def("rasterize_voxels_backward", &BACKWARD::rasterize_voxels_backward);

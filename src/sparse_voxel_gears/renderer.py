@@ -122,6 +122,7 @@ class SVRenderer:
         ###################################
         # Call low-level rasterization API
         ###################################
+        vox_fn = other_opt.pop("vertex_vox_fn", self.vox_fn)
         raster_settings = svraster_cuda.renderer.RasterSettings(
             color_mode=color_mode,
             n_samp_per_vox=n_samp_per_vox,
@@ -144,7 +145,7 @@ class SVRenderer:
             self.octpath,
             self.vox_center,
             self.vox_size,
-            self.vox_fn)
+            vox_fn)
 
         ###################################
         # Post-processing and pack output
@@ -176,3 +177,17 @@ class SVRenderer:
         render_pkg['color'] = render_pkg['color'].clamp(0, 1)
 
         return render_pkg
+
+    def render_vertex(self, camera, vertex_module, **options):
+        """Render fixed geometry with per-vertex residual appearance."""
+        if options.get("color_mode") not in (None, "sh0"):
+            raise ValueError("Vertex appearance requires SH0 base")
+        options.pop("color_mode", None)
+        delta = vertex_module(self.grid_pts_xyz, camera.c2w[:3, 3])
+        packed = delta[self.vox_key].reshape(self.num_voxels, 24)
+        def vertex_vox_fn(idx, cam_pos, color_mode):
+            params = self.vox_fn(idx, cam_pos, "sh0")
+            params["rgbs"] = torch.cat((params["rgbs"], packed), dim=1).contiguous()
+            return params
+        return self.render(camera, color_mode="sh0", appearance_mode="vertex_trilinear",
+                           vertex_vox_fn=vertex_vox_fn, **options)

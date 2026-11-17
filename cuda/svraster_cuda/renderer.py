@@ -34,6 +34,7 @@ class RasterSettings(NamedTuple):
     # Optional gt color for color concnetration loss in backward pass.
     gt_color: torch.Tensor = torch.empty(0)
     debug: bool = False
+    appearance_mode: str = "original_sh"
 
 
 def rasterize_voxels(
@@ -50,6 +51,13 @@ def rasterize_voxels(
     if raster_settings.n_samp_per_vox > _C.MAX_N_SAMP or raster_settings.n_samp_per_vox < 1:
         raise Exception(f"n_samp_per_vox should be in range [1, {_C.MAX_N_SAMP}].")
 
+    if raster_settings.appearance_mode not in ("original_sh", "vertex_trilinear"):
+        raise ValueError("Unknown appearance mode")
+    if raster_settings.appearance_mode == "vertex_trilinear":
+        if raster_settings.n_samp_per_vox != 1:
+            raise ValueError("Vertex appearance requires one sample")
+        if any((raster_settings.lambda_R_concen, raster_settings.lambda_ascending, raster_settings.lambda_dist)):
+            raise ValueError("Vertex appearance does not support CUDA regularizers")
     N = octree_paths.numel()
     device = octree_paths.device
     if vox_centers.shape[0] != N or vox_lengths.numel() != N:
@@ -103,6 +111,10 @@ def rasterize_voxels(
         raise Exception("Device mismatch: rgbs.")
     if subdiv_p.device != device:
         raise Exception("Device mismatch: subdiv_p.")
+
+    expected = 27 if raster_settings.appearance_mode == "vertex_trilinear" else 3
+    if rgbs.shape != (N, expected) or rgbs.dtype != torch.float32 or not rgbs.is_contiguous():
+        raise ValueError("Invalid RGB buffer shape, dtype or contiguity")
 
     # Some checking for regularizations
     if raster_settings.lambda_R_concen > 0:
@@ -170,7 +182,7 @@ class _RasterizeVoxels(torch.autograd.Function):
             raster_settings.debug,
         )
 
-        num_rendered, binningBuffer, imgBuffer, out_color, out_depth, out_normal, out_T, max_w = _C.rasterize_voxels(*args)
+        num_rendered, binningBuffer, imgBuffer, out_color, out_depth, out_normal, out_T, max_w = (_C.rasterize_vertex if raster_settings.appearance_mode == "vertex_trilinear" else _C.rasterize_voxels)(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
@@ -232,7 +244,7 @@ class _RasterizeVoxels(torch.autograd.Function):
             raster_settings.debug,
         )
 
-        dL_dgeos, dL_drgbs, subdiv_p_bw = _C.rasterize_voxels_backward(*args)
+        dL_dgeos, dL_drgbs, subdiv_p_bw = (_C.rasterize_vertex_backward if raster_settings.appearance_mode == "vertex_trilinear" else _C.rasterize_voxels_backward)(*args)
 
         grads = (
             None, # => raster_settings

@@ -20,6 +20,8 @@ setup(
                 "src/raster_state.cu",
                 "src/preprocess.cu",
                 "src/forward.cu",
+                "src/vertex_forward.cu",
+                "src/vertex_backward.cu",
                 "src/backward.cu",
                 "src/geo_params_gather.cu",
                 "src/sh_compute.cu",
