@@ -33,10 +33,10 @@ def wxyz2matrix(wxyz):
 
 
 class SVRasterViewer:
-    def __init__(self, cfg):
+    def __init__(self, cfg, model=None, camera_pack=None, model_path=None, iteration=-1):
 
         # Load cameras
-        data_pack = DataPack(
+        data_pack = camera_pack if camera_pack is not None else DataPack(
             source_path=cfg.data.source_path,
             image_dir_name=cfg.data.image_dir_name,
             res_downscale=cfg.data.res_downscale,
@@ -51,16 +51,19 @@ class SVRasterViewer:
         self.tr_cam_lst = data_pack.get_train_cameras()
         self.te_cam_lst = data_pack.get_test_cameras()
 
-        # Load model
-        self.voxel_model = SparseVoxelModel(
-            n_samp_per_vox=cfg.model.n_samp_per_vox,
-            sh_degree=cfg.model.sh_degree,
-            ss=cfg.model.ss,
-            white_background=cfg.model.white_background,
-            black_background=cfg.model.black_background,
-        )
-        self.voxel_model.load_iteration(args.model_path, args.iteration)
-        self.voxel_model.freeze_vox_geo()
+        # Optional injection lets the vertex viewer reuse navigation and UI.
+        if model is not None:
+            self.voxel_model = model
+        else:
+            self.voxel_model = SparseVoxelModel(
+                n_samp_per_vox=cfg.model.n_samp_per_vox,
+                sh_degree=cfg.model.sh_degree,
+                ss=cfg.model.ss,
+                white_background=cfg.model.white_background,
+                black_background=cfg.model.black_background,
+            )
+            self.voxel_model.load_iteration(model_path, iteration)
+            self.voxel_model.freeze_vox_geo()
 
         # Create viser server
         self.server = viser.ViserServer(port=cfg.port)
@@ -242,9 +245,9 @@ class SVRasterViewer:
 
         start = time.time()
         try:
-            render_pkg = self.voxel_model.render(minicam, **render_opt)
-        except RuntimeError as e:
-            print(e)
+            render_pkg = self.render_model(minicam, render_opt)
+        except RuntimeError:
+            raise
         torch.cuda.synchronize()
         end = time.time()
         eps = end - start
@@ -268,6 +271,9 @@ class SVRasterViewer:
         del render_pkg
 
         return im, eps
+
+    def render_model(self, camera, options):
+        return self.voxel_model.render(camera, **options)
 
     def update(self):
         if not self.is_connected:
@@ -302,7 +308,7 @@ if __name__ == "__main__":
     cfg.port = args.port
 
     # Create and run viewer
-    svraster_viewer = SVRasterViewer(cfg)
+    svraster_viewer = SVRasterViewer(cfg, model_path=args.model_path, iteration=args.iteration)
 
     while True:
         svraster_viewer.update()
