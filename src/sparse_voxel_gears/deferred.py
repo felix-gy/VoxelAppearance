@@ -11,7 +11,9 @@ from torch.nn import functional as F
 MODE = "deferred_mlp"
 NHT_MODE = "deferred_nht_trilinear"
 LINEAR_MODE = "deferred_trilinear"
-FEATURE_SHAPES = {MODE: (8,), NHT_MODE: (8, 4), LINEAR_MODE: (8, 8)}
+JOINT_MODE = "deferred_nht_joint"
+JOINT_ACTIVATION_STEP = 1000
+FEATURE_SHAPES = {MODE: (8,), NHT_MODE: (8, 4), LINEAR_MODE: (8, 8), JOINT_MODE: (8, 4)}
 DEFERRED_MODES = tuple(FEATURE_SHAPES)
 VERSION = 1
 
@@ -51,9 +53,16 @@ def save_deferred(model, root, step, config, training):
         "layout": layout_digest(model), "config": config,
         "model": {k: v.cpu() if torch.is_tensor(v) else v
                   for k, v in model.model_state().items()},
-        "appearance": {k: v.cpu() for k, v in model.deferred.state_dict().items()},
+        "appearance": None if model.deferred is None else {
+            k: v.cpu() for k, v in model.deferred.state_dict().items()},
         "training": training,
     }
+    if model.appearance_mode == JOINT_MODE:
+        active = model.deferred is not None
+        if active != (step >= JOINT_ACTIVATION_STEP):
+            raise ValueError("Joint NHT activation does not match the completed iteration")
+        priority = model.subdivision_priority
+        state.update(active=active, priority=None if priority is None else priority.detach().cpu())
     with tempfile.NamedTemporaryFile(dir=directory, suffix=".tmp", delete=False) as tmp:
         temp = Path(tmp.name)
     try:
@@ -70,6 +79,17 @@ def restore_deferred(model, state):
     model.load_model_state(state["model"])
     if layout_digest(model) != state["layout"]:
         raise ValueError("Deferred checkpoint layout mismatch")
+    if model.appearance_mode == JOINT_MODE:
+        if (type(state.get("active")) is not bool or
+                state["active"] != (state["step"] >= JOINT_ACTIVATION_STEP) or
+                state["active"] != (state["appearance"] is not None)):
+            raise ValueError("Invalid joint NHT checkpoint activation")
+        model.active_sh_degree = 0
+        priority = state.get("priority")
+        if priority is not None:
+            model._subdiv_p.grad = priority.to(model._subdiv_p.device)
+        if not state["active"]:
+            return
     model.init_deferred(model.appearance_mode)
     expected = model.deferred.state_dict()
     actual = state["appearance"]

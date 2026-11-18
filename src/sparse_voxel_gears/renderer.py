@@ -9,7 +9,7 @@
 import torch
 import svraster_cuda
 
-from src.sparse_voxel_gears.deferred import DEFERRED_MODES
+from src.sparse_voxel_gears.deferred import DEFERRED_MODES, JOINT_MODE
 from src.utils.image_utils import resize_rendering
 
 class SVRenderer:
@@ -119,10 +119,10 @@ class SVRenderer:
         ###################################
         deferred = self.deferred is not None and color_mode in (None, self.appearance_mode)
         if deferred:
-            if rand_bg:
+            if rand_bg and self.appearance_mode != JOINT_MODE:
                 raise ValueError("Deferred appearance requires a deterministic background")
             color_mode = self.appearance_mode
-        elif color_mode in DEFERRED_MODES or return_deferred_buffers or (color_mode is None and self.appearance_mode in DEFERRED_MODES):
+        elif color_mode in DEFERRED_MODES or return_deferred_buffers or (color_mode is None and self.appearance_mode in DEFERRED_MODES and self.appearance_mode != JOINT_MODE):
             raise ValueError("Deferred buffers require an initialized deferred model")
         if ss is None:
             ss = self.ss

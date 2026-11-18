@@ -7,6 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import os
+import random
 import json
 import time
 import uuid
@@ -27,11 +28,16 @@ from src.utils import loss_utils
 
 from src.dataloader.data_pack import DataPack, compute_iter_idx
 from src.sparse_voxel_model import SparseVoxelModel
+from src.sparse_voxel_gears.deferred import JOINT_ACTIVATION_STEP, JOINT_MODE, save_deferred
 
 import svraster_cuda
 
 
 def training(args):
+    if args.appearance_mode == JOINT_MODE:
+        with open(os.path.join(args.model_path, "config.yaml")) as config_file:
+            saved_config = config_file.read()
+
     # Init and load data pack
     data_pack = DataPack(
         source_path=cfg.data.source_path,
@@ -77,6 +83,8 @@ def training(args):
         pcd=data_pack.point_cloud,
         suggested_bounding=data_pack.suggested_bounding)
 
+    joint = args.appearance_mode == JOINT_MODE
+
     # Init voxel model
     voxel_model = SparseVoxelModel(
         n_samp_per_vox=cfg.model.n_samp_per_vox,
@@ -84,11 +92,12 @@ def training(args):
         ss=cfg.model.ss,
         white_background=cfg.model.white_background,
         black_background=cfg.model.black_background,
+        appearance_mode=args.appearance_mode,
     )
 
     if args.load_iteration:
         loaded_iter = voxel_model.load_iteration(
-            args.model_path, args.load_iteration)
+            args.model_path, args.load_iteration, load_training=joint)
     else:
         loaded_iter = None
         voxel_model.model_init(
@@ -96,14 +105,14 @@ def training(args):
             outside_level=cfg.bounding.outside_level,
             init_n_level=cfg.init.init_n_level,
             init_out_ratio=cfg.init.init_out_ratio,
-            sh_degree_init=cfg.init.sh_degree_init,
+            sh_degree_init=0 if joint else cfg.init.sh_degree_init,
             geo_init=cfg.init.geo_init,
             sh0_init=cfg.init.sh0_init,
             shs_init=cfg.init.shs_init,
             cameras=tr_cams,
         )
 
-    first_iter = loaded_iter if loaded_iter else 1
+    first_iter = (loaded_iter + int(joint)) if loaded_iter else 1
     print(f"Start optmization from iters={first_iter}.")
 
     # Init optimizer
@@ -113,7 +122,8 @@ def training(args):
             [
                 {'params': [voxel_model._geo_grid_pts], 'lr': cfg.optimizer.geo_lr},
                 {'params': [voxel_model._sh0], 'lr': cfg.optimizer.sh0_lr},
-                {'params': [voxel_model._shs], 'lr': cfg.optimizer.shs_lr},
+                {'params': list(voxel_model.deferred.parameters()) if voxel_model.deferred is not None
+                 else [voxel_model._shs], 'lr': cfg.optimizer.shs_lr},
             ],
             betas=(cfg.optimizer.optim_beta1, cfg.optimizer.optim_beta2),
             eps=cfg.optimizer.optim_eps)
@@ -125,7 +135,30 @@ def training(args):
         return optimizer, scheduler
 
     optimizer, scheduler = create_trainer()
-    if loaded_iter and args.load_optimizer:
+    if loaded_iter and joint:
+        state = voxel_model.loaded_training
+        if not state:
+            raise ValueError("Joint NHT resumption requires a training checkpoint")
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        indices = state["camera_indices"]
+        if len(indices) < cfg.procedure.n_iter:
+            if indices != tr_cam_indices[:len(indices)]:
+                raise ValueError("Cannot extend training with a different camera schedule")
+        else:
+            tr_cam_indices = indices
+        if cfg.auto_exposure.enable:
+            for cam, (updated, matrix, offset) in zip(tr_cams, state["exposure"], strict=True):
+                cam.exposure_updated = updated
+                cam._exposure_A = matrix.cuda()
+                cam._exposure_t = offset.cuda()
+        random.setstate(state["python_rng"])
+        np.random.set_state(state["numpy_rng"])
+        torch.set_rng_state(state["torch_rng"])
+        torch.cuda.set_rng_state_all(state["cuda_rng"])
+        voxel_model.loaded_training = None
+        del state
+    elif loaded_iter and args.load_optimizer:
         optim_ckpt = torch.load(os.path.join(args.model_path, "optim.pt"))
         optimizer.load_state_dict(optim_ckpt['optim'])
         scheduler.load_state_dict(optim_ckpt['sched'])
@@ -175,7 +208,7 @@ def training(args):
         iter_start.record()
 
         # Increase the degree of SH by one up to a maximum degree
-        if iteration % 1000 == 0:
+        if not joint and iteration % 1000 == 0:
             voxel_model.sh_degree_add1()
 
         # Recompute sh from cameras
@@ -354,6 +387,15 @@ def training(args):
             # Reset priority for the next round
             voxel_model.reset_subdivision_priority()
 
+        if joint and iteration == JOINT_ACTIVATION_STEP:
+            # First adaptation has already completed. NHT starts at the next render.
+            voxel_model.init_deferred(JOINT_MODE)
+            if not (need_pruning or need_subdividing):
+                angular = optimizer.param_groups[2]
+                optimizer.state.pop(voxel_model._shs, None)
+                angular["params"] = list(voxel_model.deferred.parameters())
+            print(f"[NHT] Active from iteration {iteration + 1}")
+
         if need_pruning or need_subdividing:
             # Re-create trainer for the updated parameters
             optimizer, scheduler = create_trainer()
@@ -404,8 +446,21 @@ def training(args):
                 ema_psnr=ema_psnr_for_log)
 
             if iteration in args.checkpoint_iterations or iteration == cfg.procedure.n_iter:
-                voxel_model.save_iteration(args.model_path, iteration, quantize=args.save_quantized)
-                if args.save_optimizer:
+                if joint:
+                    state = {
+                        "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                        "camera_indices": tr_cam_indices,
+                        "python_rng": random.getstate(), "numpy_rng": np.random.get_state(),
+                        "torch_rng": torch.get_rng_state(), "cuda_rng": torch.cuda.get_rng_state_all(),
+                        "exposure": [(cam.exposure_updated, cam._exposure_A.cpu(), cam._exposure_t.cpu())
+                                     for cam in tr_cams] if cfg.auto_exposure.enable else [],
+                    }
+                    voxel_model.latest_save_path = save_deferred(voxel_model, args.model_path, iteration,
+                                                               saved_config, state)
+                    del state
+                else:
+                    voxel_model.save_iteration(args.model_path, iteration, quantize=args.save_quantized)
+                if args.save_optimizer and not joint:
                     torch.save(
                         {'optim': optimizer.state_dict(), 'sched': scheduler.state_dict()},
                         os.path.join(args.model_path, "optim.pt"))
@@ -556,11 +611,21 @@ if __name__ == "__main__":
     parser.add_argument("--test_iterations", nargs="*", type=int, default=[-1])
     parser.add_argument("--pg_view_every", type=int, default=200)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--appearance-mode", choices=("sh", JOINT_MODE), default="sh")
     parser.add_argument("--load_iteration", type=int, default=None)
     parser.add_argument("--load_optimizer", action='store_true')
     parser.add_argument("--save_optimizer", action='store_true')
     parser.add_argument("--save_quantized", action='store_true')
     args, cmd_lst = parser.parse_known_args()
+
+    if args.appearance_mode == JOINT_MODE:
+        if args.save_quantized:
+            parser.error("Joint NHT requires full precision checkpoints")
+        if args.load_iteration is not None:
+            if not args.model_path or args.load_iteration == 0:
+                parser.error("Joint NHT resume requires --model_path and a valid iteration")
+            if not args.cfg_files:
+                args.cfg_files = [os.path.join(args.model_path, "config.yaml")]
 
     # Update config from files and command line
     update_config(args.cfg_files, cmd_lst)

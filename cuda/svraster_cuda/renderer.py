@@ -94,7 +94,7 @@ def rasterize_voxels(
         raise Exception(f"Expect geos in ({N}, 8) but got", geos.shape)
     if rgbs.ndim != 2 or rgbs.shape[0] != N or rgbs.shape[1] not in (3, 11, 35, 67):
         raise Exception(f"Expect rgbs with {N} rows and width 3, 11, 35 or 67 but got", rgbs.shape)
-    if rgbs.shape[1] != 3 and (geos.requires_grad or subdiv_p.requires_grad or
+    if rgbs.shape[1] != 3 and raster_settings.color_mode != "deferred_nht_joint" and (geos.requires_grad or subdiv_p.requires_grad or
                                any((raster_settings.lambda_R_concen, raster_settings.lambda_ascending,
                                     raster_settings.lambda_dist))):
         raise ValueError("Deferred rasterization requires frozen geometry and appearance-only loss")
@@ -234,6 +234,7 @@ class _RasterizeVoxels(torch.autograd.Function):
             out_normal,
 
             raster_settings.debug,
+            raster_settings.color_mode == "deferred_nht_joint",
         )
 
         dL_dgeos, dL_drgbs, subdiv_p_bw = _C.rasterize_voxels_backward(*args)

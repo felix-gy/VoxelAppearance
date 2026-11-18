@@ -51,6 +51,7 @@ renderCUDA(
     const float* __restrict__ geos,
     const float* __restrict__ rgbs,
     const int channels,
+    const bool joint_nht,
 
     const float* __restrict__ out_T,
     const uint32_t* __restrict__ tile_last,
@@ -336,7 +337,7 @@ renderCUDA(
             T = T / (1.f - alpha);
             const float pt_w = alpha * T;
 
-            if (channels >= deferred_trilinear::output) {
+            if (channels >= deferred_trilinear::output && !joint_nht) {
                 const int voxel = collected_vox_id[j];
                 float* grad = dL_dvox + voxel * channels;
                 const float* pixel_grad = dL_dout_color + pix_id;
@@ -367,6 +368,19 @@ renderCUDA(
 
             // The gradients w.r.t. voxel alpha.
             float dL_dpt_w = dot(dL_dpix, c);
+            if (joint_nht) {
+                const int pixels = H * W;
+                const float* g_features = dL_dout_color + 3 * pixels + pix_id;
+                const float* features = rgbs + vox_id * channels + 3;
+                const float3 q = deferred_trilinear::midpoint(ro, rd, a, b, vox_c, vox_l);
+                tri_interp_weight(q, interp_w);
+                float descriptor[8] = {};
+                deferred_trilinear::accumulate<4>(features, interp_w, 1.f, descriptor);
+                for (int k = 0; k < 8; ++k)
+                    dL_dpt_w += g_features[k * pixels] * descriptor[k];
+                deferred_trilinear::backward<4>(features, interp_w, pt_w,
+                    g_features, pixels, dL_dvox + vox_id * 44 + 12);
+            }
 
             // Gradient from distortion loss
             if (need_distortion)
@@ -549,7 +563,7 @@ renderCUDA(
             const int base_id = cg::this_grid().thread_rank();
             #pragma unroll
             for (int iii=0; iii<12; ++iii)
-                atomicAdd(dL_dvox + vox_id * 12 + (base_id+iii)%12, grad_pack[(base_id+iii)%12]);
+                atomicAdd(dL_dvox + vox_id * (joint_nht ? 44 : 12) + (base_id+iii)%12, grad_pack[(base_id+iii)%12]);
         }
     }
 }
@@ -610,6 +624,7 @@ void render(
     const float* geos,
     const float* rgbs,
     const int channels,
+    const bool joint_nht,
 
     const float* out_T,
     const uint32_t* tile_last,
@@ -656,6 +671,7 @@ void render(
         geos,
         rgbs,
         channels,
+        joint_nht,
 
         out_T,
         tile_last,
@@ -714,23 +730,25 @@ rasterize_voxels_backward(
     const torch::Tensor& out_D,
     const torch::Tensor& out_N,
 
-    const bool debug)
+    const bool debug,
+    const bool joint_nht)
 {
     if (vox_centers.ndimension() != 2 || vox_centers.size(1) != 3)
         AT_ERROR("vox_centers must have dimensions (num_points, 3)");
 
     const int P = vox_centers.size(0);
     const int channels = rgbs.size(1);
+    TORCH_CHECK(!joint_nht || channels == deferred_trilinear::harmonic, "Invalid joint NHT input");
 
     if (P == 0)
     {
-        torch::Tensor dL_dgeos = torch::empty({0});
+        torch::Tensor dL_dgeos = torch::zeros_like(geos);
         torch::Tensor dL_drgbs = torch::zeros_like(rgbs);
-        torch::Tensor subdiv_p_bw = torch::empty({0});
+        torch::Tensor subdiv_p_bw = torch::zeros({0, 1}, geos.options());
         return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw);
     }
 
-    torch::Tensor dL_dvox = torch::zeros({P, channels >= deferred_trilinear::output ? channels : geos.size(1)+3+1}, vox_centers.options());
+    torch::Tensor dL_dvox = torch::zeros({P, joint_nht ? 44 : (channels >= deferred_trilinear::output ? channels : 12)}, vox_centers.options());
     dim3 tile_grid((image_width + BLOCK_X - 1) / BLOCK_X, (image_height + BLOCK_Y - 1) / BLOCK_Y, 1);
     dim3 block(BLOCK_X, BLOCK_Y, 1);
 
@@ -767,6 +785,7 @@ rasterize_voxels_backward(
         geos.contiguous().data_ptr<float>(),
         rgbs.contiguous().data_ptr<float>(),
         channels,
+        joint_nht,
 
         out_T.contiguous().data_ptr<float>(),
         imgState.tile_last,
@@ -789,6 +808,11 @@ rasterize_voxels_backward(
         dL_dvox.contiguous().data_ptr<float>());
     CHECK_CUDA(debug);
 
+    if (joint_nht) {
+        auto rgb_and_features = torch::cat({dL_dvox.narrow(1, 8, 3), dL_dvox.narrow(1, 12, 32)}, 1);
+        return std::make_tuple(dL_dvox.narrow(1, 0, 8).contiguous(), rgb_and_features,
+                               dL_dvox.narrow(1, 11, 1).contiguous());
+    }
     if (channels >= deferred_trilinear::output)
         return std::make_tuple(torch::Tensor(), dL_dvox, torch::Tensor());
 

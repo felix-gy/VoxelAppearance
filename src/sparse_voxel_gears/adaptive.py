@@ -8,6 +8,8 @@
 
 import torch
 
+from src.sparse_voxel_gears.deferred import JOINT_MODE
+
 from src.utils import octree_utils
 
 '''
@@ -35,7 +37,7 @@ class SVAdaptive:
         Input:
             @prune_mask      [N] Mask indicating the voxels to prune.
         '''
-        if self.deferred is not None:
+        if self.deferred is not None and self.appearance_mode != JOINT_MODE:
             raise ValueError("Deferred appearance requires fixed topology")
         if len(prune_mask.shape) == 2:
             assert prune_mask.shape[1] == 1
@@ -44,6 +46,9 @@ class SVAdaptive:
         kept_idx = (~prune_mask).argwhere().squeeze(1)
         if len(kept_idx) == 0:
             return
+
+        if self.deferred is not None:
+            self.deferred.features = torch.nn.Parameter(self.deferred.features[kept_idx])
 
         old_vox_key = self.vox_key.clone()
 
@@ -94,7 +99,7 @@ class SVAdaptive:
             @subdivide_mask  [N] Mask indicating the voxels to subdivide.
         '''
         # Compute voxel index to keep and to subdivided
-        if self.deferred is not None:
+        if self.deferred is not None and self.appearance_mode != JOINT_MODE:
             raise ValueError("Deferred appearance requires fixed topology")
         if len(subdivide_mask.shape) == 2:
             assert subdivide_mask.shape[1] == 1
@@ -104,6 +109,12 @@ class SVAdaptive:
         subdivide_idx = subdivide_mask.argwhere().squeeze(1)
         if len(subdivide_idx) == 0:
             return
+
+        if self.deferred is not None:
+            old_features = self.deferred.features
+            children = subdivide_by_interp(old_features[subdivide_idx])
+            self.deferred.features = torch.nn.Parameter(
+                mask_cat_perm(old_features, kept_idx=kept_idx, cat_tensor=children))
 
         old_vox_key = self.vox_key.clone()
 

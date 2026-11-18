@@ -53,7 +53,8 @@ rasterize_voxels_backward(
     const torch::Tensor& out_D,
     const torch::Tensor& out_N,
 
-    const bool debug);
+    const bool debug,
+    const bool joint_nht);
 
 }
 
