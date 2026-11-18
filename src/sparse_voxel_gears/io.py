@@ -10,7 +10,7 @@ import os
 import re
 import torch
 
-from src.sparse_voxel_gears.deferred import MODE, restore_deferred
+from src.sparse_voxel_gears.deferred import DEFERRED_MODES, restore_deferred
 
 class SVInOut:
 
@@ -19,7 +19,7 @@ class SVInOut:
         Save the necessary attributes and parameters for reproducing rendering.
         '''
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if self.appearance_mode == MODE:
+        if self.appearance_mode in DEFERRED_MODES:
             raise ValueError("Use save_deferred for deferred appearance models")
         state_dict = self.model_state()
 
@@ -55,11 +55,11 @@ class SVInOut:
         self.loaded_path = path
         state_dict = torch.load(path, map_location="cpu", weights_only=False)
 
-        if self.appearance_mode == MODE:
+        if self.appearance_mode in DEFERRED_MODES:
             restore_deferred(self, state_dict)
             return state_dict
         if "appearance_mode" in state_dict:
-            raise ValueError("Expected SH checkpoint. Select deferred_mlp to load a deferred model.")
+            raise ValueError("Expected SH checkpoint. Select the matching deferred mode to load a deferred model.")
         self.load_model_state(state_dict)
         return None
 

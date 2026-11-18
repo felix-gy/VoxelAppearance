@@ -9,13 +9,17 @@ from torch import nn
 from torch.nn import functional as F
 
 MODE = "deferred_mlp"
+NHT_MODE = "deferred_nht_trilinear"
+LINEAR_MODE = "deferred_trilinear"
+FEATURE_SHAPES = {MODE: (8,), NHT_MODE: (8, 4), LINEAR_MODE: (8, 8)}
+DEFERRED_MODES = tuple(FEATURE_SHAPES)
 VERSION = 1
 
 
 class DeferredAppearance(nn.Module):
-    def __init__(self, voxels, device):
+    def __init__(self, voxels, device, mode=MODE):
         super().__init__()
-        self.features = nn.Parameter(torch.randn(voxels, 8, device=device) * 0.01)
+        self.features = nn.Parameter(torch.randn(voxels, *FEATURE_SHAPES[mode], device=device, dtype=torch.float32) * 0.01)
         self.decoder = nn.Sequential(
             nn.Linear(29, 32), nn.ReLU(), nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 3),
         ).to(device)
@@ -43,7 +47,7 @@ def save_deferred(model, root, step, config, training):
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"iter{step:06d}_model.pt"
     state = {
-        "appearance_mode": MODE, "version": VERSION, "step": step,
+        "appearance_mode": model.appearance_mode, "version": VERSION, "step": step,
         "layout": layout_digest(model), "config": config,
         "model": {k: v.cpu() if torch.is_tensor(v) else v
                   for k, v in model.model_state().items()},
@@ -61,12 +65,12 @@ def save_deferred(model, root, step, config, training):
 
 
 def restore_deferred(model, state):
-    if state.get("appearance_mode") != MODE or state.get("version") != VERSION:
-        raise ValueError("Expected a compatible deferred_mlp checkpoint")
+    if state.get("appearance_mode") != model.appearance_mode or model.appearance_mode not in DEFERRED_MODES or state.get("version") != VERSION:
+        raise ValueError(f"Expected a compatible {model.appearance_mode} checkpoint")
     model.load_model_state(state["model"])
     if layout_digest(model) != state["layout"]:
         raise ValueError("Deferred checkpoint layout mismatch")
-    model.init_deferred()
+    model.init_deferred(model.appearance_mode)
     expected = model.deferred.state_dict()
     actual = state["appearance"]
     if expected.keys() != actual.keys() or any(

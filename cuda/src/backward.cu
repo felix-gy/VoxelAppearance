@@ -22,6 +22,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include "backward.h"
 #include "raster_state.h"
 #include "auxiliary.h"
+#include "deferred_trilinear.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -335,11 +336,25 @@ renderCUDA(
             T = T / (1.f - alpha);
             const float pt_w = alpha * T;
 
-            if (channels == 11) {
+            if (channels >= deferred_trilinear::output) {
                 const int voxel = collected_vox_id[j];
-                for (int k = 0; k < channels; ++k)
-                    atomicAdd(dL_dvox + voxel * channels + k,
-                              pt_w * dL_dout_color[k * H * W + pix_id]);
+                float* grad = dL_dvox + voxel * channels;
+                const float* pixel_grad = dL_dout_color + pix_id;
+                const int pixels = H * W;
+                const int direct = channels == deferred_trilinear::output ? channels : 3;
+                for (int k = 0; k < direct; ++k)
+                    atomicAdd(grad + k, pt_w * pixel_grad[k * pixels]);
+                if (channels > deferred_trilinear::output) {
+                    const float3 q = deferred_trilinear::midpoint(ro, rd, a, b, vox_c, vox_l);
+                    tri_interp_weight(q, interp_w);
+                    const float* features = rgbs + voxel * channels + 3;
+                    if (channels == deferred_trilinear::harmonic)
+                        deferred_trilinear::backward<4>(features, interp_w, pt_w,
+                            pixel_grad + 3 * pixels, pixels, grad + 3);
+                    else
+                        deferred_trilinear::backward<8>(features, interp_w, pt_w,
+                            pixel_grad + 3 * pixels, pixels, grad + 3);
+                }
                 continue;
             }
 
@@ -715,7 +730,7 @@ rasterize_voxels_backward(
         return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw);
     }
 
-    torch::Tensor dL_dvox = torch::zeros({P, channels == 11 ? channels : geos.size(1)+3+1}, vox_centers.options());
+    torch::Tensor dL_dvox = torch::zeros({P, channels >= deferred_trilinear::output ? channels : geos.size(1)+3+1}, vox_centers.options());
     dim3 tile_grid((image_width + BLOCK_X - 1) / BLOCK_X, (image_height + BLOCK_Y - 1) / BLOCK_Y, 1);
     dim3 block(BLOCK_X, BLOCK_Y, 1);
 
@@ -774,7 +789,7 @@ rasterize_voxels_backward(
         dL_dvox.contiguous().data_ptr<float>());
     CHECK_CUDA(debug);
 
-    if (channels == 11)
+    if (channels >= deferred_trilinear::output)
         return std::make_tuple(torch::Tensor(), dL_dvox, torch::Tensor());
 
     std::vector<torch::Tensor> gradient_lst = dL_dvox.split({geos.size(1), 3, 1}, 1);

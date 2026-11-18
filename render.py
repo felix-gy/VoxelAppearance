@@ -18,6 +18,7 @@ import torch
 from src.config import cfg, update_argparser, update_config
 
 from src.dataloader.data_pack import DataPack
+from src.sparse_voxel_gears.deferred import DEFERRED_MODES
 from src.sparse_voxel_model import SparseVoxelModel
 from src.utils.image_utils import im_tensor2np, viz_tensordepth
 
@@ -129,7 +130,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Sparse voxels raster rendering.")
     parser.add_argument('model_path')
-    parser.add_argument("--appearance-mode", choices=("sh", "deferred_mlp"), default="sh")
+    parser.add_argument("--appearance-mode", choices=("sh", *DEFERRED_MODES), default="sh")
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")

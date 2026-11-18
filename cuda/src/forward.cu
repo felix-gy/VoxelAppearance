@@ -22,6 +22,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include "forward.h"
 #include "raster_state.h"
 #include "auxiliary.h"
+#include "deferred_trilinear.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -263,6 +264,14 @@ renderCUDA(
                 #pragma unroll
                 for (int k = 0; k < 8; ++k)
                     latent[k] += pt_w * features[k];
+            } else if (channels > deferred_trilinear::output) {
+                const float3 q = deferred_trilinear::midpoint(ro, rd, a, b, vox_c, vox_l);
+                tri_interp_weight(q, interp_w);
+                const float* features = rgbs + vox_id * channels + 3;
+                if (channels == deferred_trilinear::harmonic)
+                    deferred_trilinear::accumulate<4>(features, interp_w, pt_w, latent);
+                else
+                    deferred_trilinear::accumulate<8>(features, interp_w, pt_w, latent);
             }
 
             if (need_depth)
@@ -380,7 +389,7 @@ renderCUDA(
         out_color[0 * H * W + pix_id] = C.x + T * bg_color;
         out_color[1 * H * W + pix_id] = C.y + T * bg_color;
         out_color[2 * H * W + pix_id] = C.z + T * bg_color;
-        if (channels == 11)
+        if (channels >= deferred_trilinear::output)
             for (int k = 0; k < 8; ++k)
                 out_color[(3 + k) * H * W + pix_id] = latent[k];
         out_T[pix_id] = T;  // Equal to (1 - alpha).
@@ -777,8 +786,9 @@ rasterize_voxels(
 {
     if (vox_centers.ndimension() != 2 || vox_centers.size(1) != 3)
         AT_ERROR("vox_centers must have dimensions (num_points, 3)");
-    if (rgbs.ndimension() != 2 || (rgbs.size(1) != 3 && rgbs.size(1) != 11))
-        AT_ERROR("Expected 3 RGB channels or 3 RGB and 8 latent channels");
+    if (rgbs.ndimension() != 2 || (rgbs.size(1) != 3 && rgbs.size(1) != 11 &&
+         rgbs.size(1) != deferred_trilinear::harmonic && rgbs.size(1) != deferred_trilinear::linear))
+        AT_ERROR("Invalid RGB/appearance channel layout");
     if (vox_centers.size(0) != rgbs.size(0))
         AT_ERROR("size mismatch");
 
@@ -790,7 +800,7 @@ rasterize_voxels(
     auto float_opts = torch::TensorOptions(torch::kFloat32).device(torch::kCUDA);
     auto byte_opts = torch::TensorOptions(torch::kByte).device(torch::kCUDA);
 
-    torch::Tensor out_color = torch::full({channels, H, W}, 0.f, float_opts);
+    torch::Tensor out_color = torch::full({channels == 3 ? 3 : deferred_trilinear::output, H, W}, 0.f, float_opts);
     torch::Tensor out_depth = need_depth || need_distortion ? torch::full({3, H, W}, 0.f, float_opts) : torch::empty({0});
     torch::Tensor out_normal = need_normal ? torch::full({3, H, W}, 0.f, float_opts) : torch::empty({0});
     torch::Tensor out_T = torch::full({1, H, W}, 0.f, float_opts);
@@ -839,7 +849,7 @@ rasterize_voxels(
 
             debug);
 
-    if (P == 0 && channels == 11) {
+    if (P == 0 && channels >= deferred_trilinear::output) {
         out_T.fill_(1.f);
         out_color.narrow(0, 0, 3).fill_(bg_color);
     }

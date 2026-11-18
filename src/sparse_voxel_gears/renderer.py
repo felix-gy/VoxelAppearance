@@ -9,7 +9,7 @@
 import torch
 import svraster_cuda
 
-from src.sparse_voxel_gears.deferred import MODE
+from src.sparse_voxel_gears.deferred import DEFERRED_MODES
 from src.utils.image_utils import resize_rendering
 
 class SVRenderer:
@@ -66,11 +66,11 @@ class SVRenderer:
             active_sh_degree = int(color_mode[2])
             color_mode = "sh"
 
-        if color_mode == MODE:
+        if color_mode in DEFERRED_MODES:
             # Same forward convention as SH evaluation, with the exact clamp derivative.
             base = 0.28209479177387814 * self.sh0 + 0.5
             base = torch.where(base > 0, base, 0.)
-            rgbs = torch.cat((base, self.deferred.features), dim=1)
+            rgbs = torch.cat((base, self.deferred.features.flatten(1)), dim=1)
         elif color_mode == "sh":
             rgbs = svraster_cuda.renderer.SH_eval.apply(
                 active_sh_degree,
@@ -111,17 +111,18 @@ class SVRenderer:
             rand_bg=False,
             use_auto_exposure=False,
             return_deferred_buffers=False,
+            raster_events=None,
             **other_opt):
 
         ###################################
         # Pre-processing
         ###################################
-        deferred = self.appearance_mode == MODE and color_mode in (None, MODE)
+        deferred = self.deferred is not None and color_mode in (None, self.appearance_mode)
         if deferred:
             if rand_bg:
                 raise ValueError("Deferred appearance requires a deterministic background")
-            color_mode = MODE
-        elif color_mode == MODE or return_deferred_buffers:
+            color_mode = self.appearance_mode
+        elif color_mode in DEFERRED_MODES or return_deferred_buffers or (color_mode is None and self.appearance_mode in DEFERRED_MODES):
             raise ValueError("Deferred buffers require an initialized deferred model")
         if ss is None:
             ss = self.ss
@@ -153,12 +154,16 @@ class SVRenderer:
             need_normal=output_normal,
             track_max_w=track_max_w,
             **other_opt)
+        if raster_events is not None:
+            raster_events[0].record()
         color, depth, normal, T, max_w = svraster_cuda.renderer.rasterize_voxels(
             raster_settings,
             self.octpath,
             self.vox_center,
             self.vox_size,
             self.vox_fn)
+        if raster_events is not None:
+            raster_events[1].record()
 
         ###################################
         # Post-processing and pack output

@@ -11,7 +11,7 @@ from src.sparse_voxel_gears.properties import SVProperties
 from src.sparse_voxel_gears.renderer import SVRenderer
 from src.sparse_voxel_gears.adaptive import SVAdaptive
 from src.sparse_voxel_gears.io import SVInOut
-from src.sparse_voxel_gears.deferred import MODE, DeferredAppearance
+from src.sparse_voxel_gears.deferred import DEFERRED_MODES, MODE, DeferredAppearance
 from src.sparse_voxel_gears.pooling import SVPooling
 
 
@@ -37,7 +37,7 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
         '''
         super().__init__()
 
-        if appearance_mode not in ("sh", MODE):
+        if appearance_mode not in ("sh", *DEFERRED_MODES):
             raise ValueError(f"Unknown appearance mode {appearance_mode}")
         self.appearance_mode = appearance_mode
         self.deferred = None
@@ -72,10 +72,10 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
         self._shs = None
         self._subdiv_p = None
 
-    def init_deferred(self):
-        self.appearance_mode = MODE
+    def init_deferred(self, mode=MODE):
+        self.appearance_mode = mode
         self.active_sh_degree = 0
         self._geo_grid_pts.requires_grad_(False)
         self._shs.requires_grad_(False)
         self._subdiv_p.requires_grad_(False)
-        self.deferred = DeferredAppearance(self.num_voxels, self._sh0.device)
+        self.deferred = DeferredAppearance(self.num_voxels, self._sh0.device, mode)
