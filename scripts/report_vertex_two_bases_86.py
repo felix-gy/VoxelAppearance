@@ -9,7 +9,7 @@ from statistics import mean
 SCENES = ("materials_t", "lego")
 SEEDS = (3721, 3722)
 MODES = ("one", "two", "regularized")
-STEPS = (300, 1000, 3000)
+STEPS = (300, 1000)
 METRICS = ("psnr", "ssim", "lpips", "rms")
 
 
@@ -25,11 +25,12 @@ def report(root, out):
     rows = {}
     for path in sorted(root.glob("*/seed*/*/step*.json")):
         r = json.loads(path.read_text())
-        rows[r["scene"], r["seed"], r["step"], r["arm"]] = r
+        if r["step"] in STEPS:
+            rows[r["scene"], r["seed"], r["step"], r["arm"]] = r
 
     lines = [
         "# Vertex-MLP con 86 cámaras y suavizado de coeficientes", "",
-        f"**Hitos completos: {len(rows)}/36.**", "",
+        f"**Hitos completos: {len(rows)}/24.**", "",
         "## Protocolo", "",
         "Rama `Vertex-MLP-Dos-Bases`. Se comparan una base, dos bases y dos bases con penalización. Cada brazo usa las primeras 86 cámaras de entrenamiento por nombre y las mismas cuatro reservadas de la prueba anterior, en orden cíclico, a 256×256, fondo blanco, ss=1 y una muestra por vóxel.",
         "",
@@ -89,22 +90,22 @@ def report(root, out):
         if abs(trajectory[-1]) < .01:
             label = "la diferencia final quedó por debajo de 0,01 dB"
         elif abs(delta) < .01:
-            label = "la diferencia cambió menos de 0,01 dB entre 1000 y 3000"
+            label = "la diferencia cambió menos de 0,01 dB entre 300 y 1000"
         elif delta > 0:
-            label = "la ventaja de dos bases aumentó entre 1000 y 3000"
+            label = "la ventaja de dos bases aumentó entre 300 y 1000"
         else:
-            label = "la diferencia se movió a favor de una base entre 1000 y 3000"
-        lines.append(f"- **{scene}.** Δ medio a 300, 1000 y 3000: "
-                     f"{trajectory[0]:+.4f}, {trajectory[1]:+.4f}, {trajectory[2]:+.4f} dB. {label}.")
+            label = "la diferencia se movió a favor de una base entre 300 y 1000"
+        lines.append(f"- **{scene}.** Δ medio a 300 y 1000: "
+                     f"{trajectory[0]:+.4f} y {trajectory[1]:+.4f} dB. {label}.")
     lines += ["", "## Efecto del suavizado de coeficientes", ""]
     for scene in SCENES:
-        group = by_group.get((scene, 3000, "regularized − two"), [])
+        group = by_group.get((scene, 1000, "regularized − two"), [])
         if len(group) != 2:
-            lines.append(f"- **{scene}.** Comparación al paso 3000 pendiente.")
+            lines.append(f"- **{scene}.** Comparación al paso 1000 pendiente.")
             continue
         values = {k: mean(r[k] for r in group) for k in METRICS}
-        raw = mean(rows[scene, seed, 3000, "two"]["seams"]["rms"] for seed in SEEDS)
-        smooth = mean(rows[scene, seed, 3000, "regularized"]["seams"]["rms"] for seed in SEEDS)
+        raw = mean(rows[scene, seed, 1000, "two"]["seams"]["rms"] for seed in SEEDS)
+        smooth = mean(rows[scene, seed, 1000, "regularized"]["seams"]["rms"] for seed in SEEDS)
         direction = ("bajó el RMS en las dos semillas" if all(r["rms"] < 0 for r in group)
                      else "el cambio de RMS varió entre semillas" if min(r["rms"] for r in group) < 0
                      else "el RMS se mantuvo o subió en las dos semillas")
@@ -117,7 +118,7 @@ def report(root, out):
               "Cada hito publica un JSON por brazo con las cuatro métricas, resultados por cámara y el pico de entrenamiento del tramo. Los checkpoints incluyen apariencia, identidad, SH0 congelado y estado Adam. `paired.csv` y `paired-per-view.csv` contienen los deltas por semilla y por cámara.",
               "", "```bash",
               'export PYTHONPATH="$PWD/cuda:$PWD${PYTHONPATH:+:$PYTHONPATH}"',
-              "python scripts/reevaluate_vertex_two_bases.py lego --seed 3721 --stop 3000 \\",
+              "python scripts/reevaluate_vertex_two_bases.py lego --seed 3721 --stop 1000 \\",
               "  --output output/vertex-two-bases-86/lego/seed3721",
               "python scripts/report_vertex_two_bases_86.py",
               "```", ""]
@@ -130,7 +131,7 @@ def report(root, out):
                 writer = csv.DictWriter(stream, fieldnames=list(data[0]))
                 writer.writeheader()
                 writer.writerows(data)
-    print(f"Report: {len(rows)}/36 milestones", flush=True)
+    print(f"Report: {len(rows)}/24 milestones", flush=True)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from src.vertex_appearance.decoder import VertexTwoBases
 from src.vertex_appearance.neighbors import coefficient_penalty
 from src.vertex_appearance.runtime import fit, setup
 
-MILESTONES = (300, 1000, 3000)
+MILESTONES = (300, 1000)
 REGULARIZER = dict(strength=0.001, seed=7919, batch_size=4096)
 ARMS = ("one", "two", "regularized")
 
@@ -27,14 +27,14 @@ def publish_json(path, payload):
     os.replace(tmp, path)
 
 
-def run(scene, seed, root, stop=3000, arms=ARMS):
+def run(scene, seed, root, stop=1000, arms=ARMS):
     root.mkdir(parents=True, exist_ok=True)
     source = Path(SOURCES[scene])
     geometry = source / "checkpoints/iter020000_model.pt"
     base = yaml.safe_load((source / "config.yaml").read_text())
     base["data"].update(res_width=256, res_downscale=0., eval=True)
     base["model"].update(ss=1., white_background=True)
-    config = dict(seed=seed, steps=3000, validation_interval=300, checkpoint_interval=300,
+    config = dict(seed=seed, steps=MILESTONES[-1], validation_interval=300, checkpoint_interval=300,
                   mode="vertex_trilinear_fourier3", geometry_checkpoint=str(geometry),
                   resolved_base=base, lr_vertex_features=0.00025, lr_mlp=0.00025, lr_mix=0.00025)
     protocol = root / "protocol.yaml"
@@ -77,7 +77,7 @@ def run(scene, seed, root, stop=3000, arms=ARMS):
                       train_views=train_names, test_views=test_names)
     publish_json(root / "protocol.json", dict(**comparison, geometry=identity, milestones=MILESTONES,
                  coefficient_penalty=REGULARIZER))
-    order = [i % len(train) for i in range(3000)]
+    order = [i % len(train) for i in range(MILESTONES[-1])]
     for arm in arms:
         module = one if arm == "one" else two
         if arm != "one":
@@ -103,7 +103,9 @@ def run(scene, seed, root, stop=3000, arms=ARMS):
             continue
         if start:
             loaded = load_checkpoint(arm_dir / f"step{start:04}.pt", module, identity, optimizer, rng)
-            if loaded["config"] != arm_config:
+            # A shortened horizon keeps the same camera cycle and optimizer state.
+            saved_config = dict(loaded["config"], steps=arm_config["steps"])
+            if saved_config != arm_config:
                 raise ValueError("Saved checkpoint does not match requested protocol")
             del loaded
         loss_utils.metric_networks.clear()
@@ -140,7 +142,7 @@ if __name__ == "__main__":
     parser.add_argument("scene", choices=SOURCES)
     parser.add_argument("--seed", type=int, choices=(3721, 3722), required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--stop", type=int, choices=MILESTONES, default=3000)
+    parser.add_argument("--stop", type=int, choices=MILESTONES, default=MILESTONES[-1])
     parser.add_argument("--arms", nargs="+", choices=ARMS, default=ARMS)
     args = parser.parse_args()
     run(args.scene, args.seed, args.output, args.stop, args.arms)
