@@ -54,3 +54,20 @@ def test_two_bases_render_gradients_and_checkpoint(tmp_path):
         load_checkpoint(path, one, identity)
     with pytest.raises(ValueError, match="geometry/layout"):
         load_checkpoint(path, restored, {"layout": "other"})
+
+
+def test_neighbor_penalty_is_zero_for_equal_coefficients_and_smooths_difference():
+    from src.vertex_appearance.neighbors import coefficient_penalty
+
+    model, _ = scene()
+    module = VertexTwoBases(model.num_grid_pts, model.num_voxels).cuda()
+    penalty, edges = coefficient_penalty(model, strength=0.001, batch_size=4096)
+    assert edges == 12
+    assert penalty(module, 1).item() == 0
+    with torch.no_grad():
+        module.mix[0, 1] = 0.5
+    loss = penalty(module, 1)
+    assert loss.item() > 0
+    torch.testing.assert_close(loss, penalty(module, 1), rtol=0, atol=0)
+    loss.backward()
+    assert module.mix.grad[0, 1] > 0 and module.mix.grad[:, 1].sum().abs() < 1e-8

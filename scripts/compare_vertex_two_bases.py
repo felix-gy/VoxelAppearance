@@ -11,11 +11,11 @@ import torch
 import yaml
 from PIL import Image
 
-import svraster_cuda
 from src.utils import loss_utils
 from src.vertex_appearance.checkpoint import load_checkpoint, save_checkpoint
 from src.vertex_appearance.decoder import VertexAppearance, VertexTwoBases
 from src.vertex_appearance.runtime import fit, setup
+from src.vertex_appearance.neighbors import face_pairs
 
 SOURCES = {"materials_t": "out/materials_t", "lego": "out/lego-original"}
 
@@ -63,25 +63,6 @@ def timings(model, module, cameras):
     mean = {k: sum(row[k] for row in stats)/len(stats) for k in stats[0]}
     return dict(**mean, fps=1000/mean["total_ms"],
                 peak_mib=torch.cuda.max_memory_allocated()/2**20)
-
-
-def face_pairs(model):
-    generator = torch.Generator(device="cuda").manual_seed(3721)
-    sample = torch.randperm(model.num_voxels, generator=generator,
-                            device="cuda")[:8192]
-    levels = model.octlevel[sample]
-    coords = svraster_cuda.utils.octpath_2_ijk(model.octpath[sample], levels)
-    paths, order = model.octpath.flatten().sort()
-    for axis in range(3):
-        query = coords.clone()
-        query[:, axis] += 1
-        valid = query[:, axis] < (1 << levels.flatten().long())
-        neighbor_paths = svraster_cuda.utils.ijk_2_octpath(query[valid], levels[valid]).flatten()
-        index = torch.searchsorted(paths, neighbor_paths).clamp_max(len(paths)-1)
-        left, right = sample[valid], order[index]
-        present = ((paths[index] == neighbor_paths) &
-                   (model.octlevel[left, 0] == model.octlevel[right, 0]))
-        yield axis, left[present][:1024], right[present][:1024]
 
 
 @torch.no_grad()

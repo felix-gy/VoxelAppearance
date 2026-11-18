@@ -101,7 +101,7 @@ def evaluate(model, module, cameras, directory, baseline=None, dense=False):
     return result
 
 
-def fit(model, module, cameras, camera_order, optimizer, start, stop, *, ssim_weight=0., dense=False):
+def fit(model, module, cameras, camera_order, optimizer, start, stop, *, ssim_weight=0., dense=False, penalty=None):
     from src.utils.loss_utils import l2_loss, fast_ssim_loss
 
     for step in range(start + 1, stop + 1):
@@ -113,6 +113,8 @@ def fit(model, module, cameras, camera_order, optimizer, start, stop, *, ssim_we
         loss = l2_loss(image, target)
         if ssim_weight:
             loss = loss + ssim_weight * fast_ssim_loss(image, target)
+        if penalty is not None:
+            loss = loss + penalty(module, step)
         if not loss.isfinite():
             raise RuntimeError("Nonfinite photometric loss")
         loss.backward()
@@ -158,9 +160,15 @@ def train(args):
             camera_random.shuffle(epoch)
         camera_order.extend(epoch)
     torch.cuda.reset_peak_memory_stats()
+    penalty = None
+    if comparison and comparison.get("coefficient_penalty"):
+        from .neighbors import coefficient_penalty
+        if not isinstance(module, VertexTwoBases):
+            raise ValueError("Coefficient regularization requires two bases")
+        penalty, _ = coefficient_penalty(model, **comparison["coefficient_penalty"])
     for step, loss in fit(model, module, cameras, camera_order, optimizer, start, config["steps"],
                           ssim_weight=0. if comparison else base["regularizer"]["lambda_ssim"],
-                          dense=bool(comparison and comparison["dense"])):
+                          dense=bool(comparison and comparison["dense"]), penalty=penalty):
         if step == 1 or step % 100 == 0:
             print(f"step={step} loss={loss:.8f}", flush=True)
         if step % config['checkpoint_interval'] == 0 or step == config['steps']:
