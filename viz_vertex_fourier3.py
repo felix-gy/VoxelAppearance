@@ -11,7 +11,7 @@ from src.config import cfg as default_config
 from src.dataloader.data_pack import DataPack
 from src.sparse_voxel_model import SparseVoxelModel
 from src.vertex_appearance.joint import JointVoxelModel
-from src.vertex_appearance.decoder import VertexAppearance, VertexRGB
+from src.vertex_appearance.decoder import VertexAppearance, VertexRGB, VertexTwoBases
 from src.vertex_appearance.checkpoint import file_digest, layout_fingerprint, load_checkpoint
 from viz import SVRasterViewer
 
@@ -35,7 +35,14 @@ def load_viewer(checkpoint, geometry_checkpoint=None):
         model = SparseVoxelModel(**dict(config.model))
         geometry = geometry_checkpoint or appearance['geometry_checkpoint']
         model.load(geometry)
-        module = (VertexAppearance if state['mode'] == 'vertex_trilinear_fourier3' else VertexRGB)(model.num_grid_pts).cuda()
+        if state['mode'] == 'vertex_two_bases':
+            module = VertexTwoBases(model.num_grid_pts, model.num_voxels).cuda()
+        else:
+            kind = VertexAppearance if state['mode'] == 'vertex_trilinear_fourier3' else VertexRGB
+            module = kind(model.num_grid_pts).cuda()
+        if "frozen_sh0" in state:
+            with torch.no_grad():
+                model._sh0.copy_(state["frozen_sh0"])
         identity = dict(checkpoint_sha256=file_digest(geometry), layout=layout_fingerprint(model),
                         P=model.num_grid_pts,V=model.num_voxels)
         load_checkpoint(checkpoint,module,identity)
@@ -56,7 +63,10 @@ class VertexViewer(SVRasterViewer):
         self.vertex_module = module
         super().__init__(config,model=model,camera_pack=cameras)
         self.active_sh_degree_slider.visible = False
-        self.vertex_label = 'Vertex-RGB' if isinstance(module, VertexRGB) else 'Vertex-MLP'
+        if isinstance(module, VertexTwoBases):
+            self.vertex_label = "Vertex-MLP (2 bases)"
+        else:
+            self.vertex_label = 'Vertex-RGB' if isinstance(module, VertexRGB) else 'Vertex-MLP'
         modes = ['SH0'] if module is None else [self.vertex_label,'SH0']
         if not is_joint and model.shs.shape[1] >= 15:
             modes.append('SH3')

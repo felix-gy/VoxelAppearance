@@ -193,6 +193,8 @@ class SVRenderer:
             raise ValueError("Vertex appearance requires one sample")
         events = options.get("profile_events") or {}
         stats = options.pop("vertex_stats", None)
+        decode_all = options.pop("decode_all_vertices", False)
+        blend = getattr(vertex_module, "voxel_residual", None)
         decode_subset = getattr(vertex_module, "forward_subset", None)
 
         def record(name):
@@ -200,7 +202,7 @@ class SVRenderer:
                 events[name].record()
 
         def vertex_vox_fn(idx, cam_pos, color_mode):
-            dense = decode_subset is None or idx.numel() == self.num_voxels
+            dense = decode_all or decode_subset is None or idx.numel() == self.num_voxels
             record("selection_start")
             if not dense:
                 candidates = self.vox_key[idx]
@@ -211,10 +213,9 @@ class SVRenderer:
             else:
                 delta = decode_subset(self.grid_pts_xyz, cam_pos, vertices)
             record("appearance_end")
-            if dense:
-                residual = delta[self.vox_key].reshape(self.num_voxels, 24)
-            else:
-                residual = delta[inverse].reshape(idx.numel(), 24)
+            keys = self.vox_key if dense else inverse.view(-1, 8)
+            residual = delta[keys] if blend is None else blend(delta, keys, None if dense else idx)
+            residual = residual.reshape(self.num_voxels if dense else idx.numel(), 24)
             params = self.vox_fn(idx, cam_pos, "sh0")
             if not joint_training:
                 params = {key: value.detach() for key, value in params.items()}

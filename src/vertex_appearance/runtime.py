@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import yaml
 from PIL import Image
-from .decoder import VertexAppearance, VertexRGB
+from .decoder import VertexAppearance, VertexRGB, VertexTwoBases
 from .checkpoint import file_digest, layout_fingerprint, save_checkpoint, load_checkpoint
 
 
@@ -19,7 +19,7 @@ def parser():
     p.add_argument('--resume')
     p.add_argument('--appearance-checkpoint')
     p.add_argument('--geometry-checkpoint')
-    p.add_argument('--mode', choices=['vertex_trilinear_fourier3', 'vertex_rgb_trilinear'])
+    p.add_argument('--mode', choices=['vertex_trilinear_fourier3', 'vertex_rgb_trilinear', 'vertex_two_bases'])
     return p
 
 
@@ -37,14 +37,14 @@ def setup(args):
     for key in ('steps', 'mode', 'geometry_checkpoint'):
         if getattr(args, key, None) is not None:
             config[key] = getattr(args, key)
-    if config['mode'] not in ('vertex_trilinear_fourier3', 'vertex_rgb_trilinear'):
+    if config['mode'] not in ('vertex_trilinear_fourier3', 'vertex_rgb_trilinear', 'vertex_two_bases'):
         raise ValueError('Unsupported appearance mode')
     if config['steps'] < 1 or min(config['validation_interval'], config['checkpoint_interval']) < 1:
         raise ValueError('Steps and intervals must be positive')
     expected_appearance = dict(feature_dim=8, frequencies_pi=[1.0,2.0,4.0],
                                fourier_order='frequency_sin_xyz_cos_xyz',
                                include_raw_direction=False, direction='camera_to_vertex_world',
-                               layers=[26,64,3], dtype='float32')
+                               layers=[26,64,6 if config['mode'] == 'vertex_two_bases' else 3], dtype='float32')
     if config.get('appearance', expected_appearance) != expected_appearance:
         raise ValueError('This version requires the exact Fourier-3 architecture')
     config['appearance'] = expected_appearance
@@ -62,7 +62,14 @@ def setup(args):
     for key in ('_geo_grid_pts', '_sh0', '_shs', '_subdiv_p'):
         getattr(model, key).requires_grad_(False)
     model.freeze_vox_geo()
-    module = (VertexAppearance if config['mode'] == 'vertex_trilinear_fourier3' else VertexRGB)(model.num_grid_pts).cuda()
+    if config['mode'] == 'vertex_two_bases':
+        module = VertexTwoBases(model.num_grid_pts, model.num_voxels).cuda()
+    else:
+        kind = VertexAppearance if config['mode'] == 'vertex_trilinear_fourier3' else VertexRGB
+        module = kind(model.num_grid_pts).cuda()
+    if args.appearance_checkpoint or args.resume:
+        if "frozen_sh0" in saved:
+            model._sh0.copy_(saved["frozen_sh0"])
     data = dict(base['data'])
     data['use_test'] = data.pop('eval')
     data['alpha_is_white'] = base['model']['white_background']
@@ -72,7 +79,7 @@ def setup(args):
     return config, base, model, module, pack, identity
 
 
-def evaluate(model, module, cameras, directory, baseline=None):
+def evaluate(model, module, cameras, directory, baseline=None, dense=False):
     from src.utils.loss_utils import psnr_score, ssim_score, lpips_loss, correct_lpips_loss
     directory = Path(directory)
     (directory / 'renders').mkdir(parents=True, exist_ok=True)
@@ -81,7 +88,7 @@ def evaluate(model, module, cameras, directory, baseline=None):
     module.eval()
     with torch.no_grad():
         for i, cam in enumerate(cameras):
-            image = (model.render(cam, color_mode=baseline) if baseline else model.render_vertex(cam, module))['color']
+            image = (model.render(cam, color_mode=baseline) if baseline else model.render_vertex(cam, module, decode_all_vertices=dense))['color']
             gt = cam.image.cuda()
             rows.append(dict(view=i, PSNR=psnr_score(image, gt).item(),
                              SSIM=ssim_score(image, gt).item(),
@@ -94,8 +101,28 @@ def evaluate(model, module, cameras, directory, baseline=None):
     return result
 
 
-def train(args):
+def fit(model, module, cameras, camera_order, optimizer, start, stop, *, ssim_weight=0., dense=False):
     from src.utils.loss_utils import l2_loss, fast_ssim_loss
+
+    for step in range(start + 1, stop + 1):
+        module.train()
+        camera = cameras[camera_order[step-1]]
+        optimizer.zero_grad(set_to_none=True)
+        image = model.render_vertex(camera, module, decode_all_vertices=dense)["color"]
+        target = camera.image.cuda()
+        loss = l2_loss(image, target)
+        if ssim_weight:
+            loss = loss + ssim_weight * fast_ssim_loss(image, target)
+        if not loss.isfinite():
+            raise RuntimeError("Nonfinite photometric loss")
+        loss.backward()
+        if not all(p.grad is None or torch.isfinite(p.grad).all() for p in module.parameters()):
+            raise RuntimeError("Nonfinite appearance gradient")
+        optimizer.step()
+        yield step, loss.item()
+
+
+def train(args):
     config, base, model, module, pack, identity = setup(args)
     directory = Path(args.output)
     directory.mkdir(parents=True, exist_ok=True)
@@ -104,39 +131,45 @@ def train(args):
                dict(params=module.decoder.parameters(), lr=config['lr_mlp'])]
               if isinstance(module, VertexAppearance) else
               [dict(params=module.parameters(), lr=config['lr_vertex_features'])])
-    optimizer = torch.optim.Adam(groups, betas=(0.9,0.99), eps=1e-8)
+    if isinstance(module, VertexTwoBases):
+        groups.append(dict(params=[module.mix], lr=config.get("lr_mix", config["lr_vertex_features"])))
+    comparison = config.get("comparison")
+    betas = tuple(comparison["betas"]) if comparison else (0.9, 0.99)
+    eps = comparison["eps"] if comparison else 1e-8
+    optimizer = torch.optim.Adam(module.parameters() if comparison else groups,
+                                 lr=config["lr_vertex_features"], betas=betas, eps=eps)
     generator = torch.Generator().manual_seed(config['seed'])
     start = 0
     if args.resume:
         start = load_checkpoint(args.resume, module, identity, optimizer, generator)['step']
     cameras = pack.get_train_cameras()
+    test_cameras = pack.get_test_cameras()
+    if comparison:
+        train_by_name = {cam.image_name: cam for cam in cameras}
+        test_by_name = {cam.image_name: cam for cam in test_cameras}
+        cameras = [train_by_name[name] for name in comparison["train_views"]]
+        test_cameras = [test_by_name[name] for name in comparison["test_views"]]
     # Match the baseline: shuffled complete epochs, never sample with replacement.
     camera_order = []
     camera_random = random.Random(config['seed'])
     while len(camera_order) < config['steps']:
         epoch = list(range(len(cameras)))
-        camera_random.shuffle(epoch)
+        if not comparison:
+            camera_random.shuffle(epoch)
         camera_order.extend(epoch)
     torch.cuda.reset_peak_memory_stats()
-    for step in range(start+1, config['steps']+1):
-        module.train()
-        cam = cameras[camera_order[step-1]]
-        optimizer.zero_grad(set_to_none=True)
-        image = model.render_vertex(cam, module)['color']
-        gt = cam.image.cuda()
-        loss = l2_loss(image, gt) + base['regularizer']['lambda_ssim'] * fast_ssim_loss(image, gt)
-        if not torch.isfinite(loss):
-            raise RuntimeError("Nonfinite photometric loss")
-        loss.backward()
-        if not all(p.grad is None or torch.isfinite(p.grad).all() for p in module.parameters()):
-            raise RuntimeError('Nonfinite appearance gradient')
-        optimizer.step()
+    for step, loss in fit(model, module, cameras, camera_order, optimizer, start, config["steps"],
+                          ssim_weight=0. if comparison else base["regularizer"]["lambda_ssim"],
+                          dense=bool(comparison and comparison["dense"])):
         if step == 1 or step % 100 == 0:
-            print(f'step={step} loss={loss.item():.8f}', flush=True)
+            print(f"step={step} loss={loss:.8f}", flush=True)
         if step % config['checkpoint_interval'] == 0 or step == config['steps']:
-            save_checkpoint(directory/'checkpoints'/f'iter{step:06d}_appearance.pt', module, optimizer, step, config, identity, generator)
+            save_checkpoint(directory/'checkpoints'/f'iter{step:06d}_appearance.pt',
+                            module, optimizer, step, config, identity, generator,
+                            frozen_sh0=model._sh0 if comparison else None)
         if step % config['validation_interval'] == 0 or step == config['steps']:
-            evaluate(model, module, pack.get_test_cameras(), directory/'test'/f'iter{step:06d}')
+            evaluate(model, module, test_cameras, directory/'test'/f'iter{step:06d}',
+                     dense=bool(comparison and comparison["dense"]))
     (directory/'memory.json').write_text(json.dumps(dict(peak_allocated_bytes=torch.cuda.max_memory_allocated())))
 
 
@@ -144,14 +177,21 @@ def render(args):
     config, base, model, module, pack, identity = setup(args)
     if args.appearance_checkpoint:
         load_checkpoint(args.appearance_checkpoint, module, identity)
+    cameras = pack.get_test_cameras()
+    comparison = config.get("comparison")
+    if comparison:
+        by_name = {cam.image_name: cam for cam in cameras}
+        cameras = [by_name[name] for name in comparison["test_views"]]
+    dense = bool(comparison and comparison["dense"])
     if args.benchmark:
-        benchmark(model, module, pack.get_test_cameras(), args.output)
+        benchmark(model, module, cameras, args.output, dense=dense)
         return
     for baseline in ('sh0', 'sh3', None):
-        evaluate(model, module, pack.get_test_cameras(), Path(args.output)/(baseline or config['mode']), baseline)
+        evaluate(model, module, cameras, Path(args.output)/(baseline or config['mode']), baseline,
+                 dense=dense)
 
 
-def benchmark(model, module, cameras, output):
+def benchmark(model, module, cameras, output, *, dense=False):
     from .decoder import fourier_direction_3bands
     from torch.nn import functional as F
     output = Path(output)
@@ -173,7 +213,8 @@ def benchmark(model, module, cameras, output):
                 events['start'].record()
                 if mode == 'vertex':
                     vertex_stats = {}
-                    model.render_vertex(cam, module, profile_events=events, vertex_stats=vertex_stats)
+                    model.render_vertex(cam, module, profile_events=events, vertex_stats=vertex_stats,
+                                        decode_all_vertices=dense)
                 else:
                     model.render(cam, color_mode=mode, profile_events=events)
                 events['end'].record()
