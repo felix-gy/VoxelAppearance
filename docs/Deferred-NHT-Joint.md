@@ -55,3 +55,14 @@ python render.py output/lego-nht-joint \
   --appearance-mode deferred_nht_joint --iteration -1 --skip_train
 python eval.py output/lego-nht-joint
 ```
+
+Para abrir una cámara interactiva en Viser:
+
+```bash
+python viz.py output/lego-nht-joint \
+  --appearance-mode deferred_nht_joint --iteration 20000 --port 7007
+```
+
+Abrir `http://localhost:7007` en el navegador. El visor renderiza el checkpoint
+seleccionado con la misma ruta NHT que usa `render.py`. Se puede cambiar la
+resolución y el supersampling en la interfaz.

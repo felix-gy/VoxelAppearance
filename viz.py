@@ -17,6 +17,7 @@ import torch
 from src.config import cfg, update_argparser, update_config
 
 from src.dataloader.data_pack import DataPack
+from src.sparse_voxel_gears.deferred import DEFERRED_MODES
 from src.sparse_voxel_model import SparseVoxelModel
 from src.utils.image_utils import im_tensor2np, viz_tensordepth
 from src.cameras import MiniCam
@@ -58,6 +59,7 @@ class SVRasterViewer:
             ss=cfg.model.ss,
             white_background=cfg.model.white_background,
             black_background=cfg.model.black_background,
+            appearance_mode=args.appearance_mode,
         )
         self.voxel_model.load_iteration(args.model_path, args.iteration)
         self.voxel_model.freeze_vox_geo()
@@ -75,13 +77,15 @@ class SVRasterViewer:
         self.fps = self.server.gui.add_text("Rending FPS", initial_value="-1", disabled=True)
 
         # Create gui for setup viewer
-        self.active_sh_degree_slider = self.server.gui.add_slider(
-            "active_sh_degree",
-            min=0,
-            max=self.voxel_model.max_sh_degree,
-            step=1,
-            initial_value=self.voxel_model.active_sh_degree,
-        )
+        self.active_sh_degree_slider = None
+        if self.voxel_model.appearance_mode == "sh":
+            self.active_sh_degree_slider = self.server.gui.add_slider(
+                "active_sh_degree",
+                min=0,
+                max=self.voxel_model.max_sh_degree,
+                step=1,
+                initial_value=self.voxel_model.active_sh_degree,
+            )
 
         self.ss_slider = self.server.gui.add_slider(
             "ss",
@@ -222,7 +226,8 @@ class SVRasterViewer:
             near=near,
         )
 
-        self.voxel_model.active_sh_degree = int(self.active_sh_degree_slider.value)
+        if self.active_sh_degree_slider is not None:
+            self.voxel_model.active_sh_degree = int(self.active_sh_degree_slider.value)
 
         render_opt = {
             'ss': self.ss_slider.value,
@@ -290,6 +295,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Sparse voxels raster visualizer.")
     parser.add_argument('model_path')
+    parser.add_argument("--appearance-mode", choices=("sh", *DEFERRED_MODES), default="sh")
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--port", default=7007, type=int)
     args = parser.parse_args()
