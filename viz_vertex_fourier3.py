@@ -11,7 +11,7 @@ from src.config import cfg as default_config
 from src.dataloader.data_pack import DataPack
 from src.sparse_voxel_model import SparseVoxelModel
 from src.vertex_appearance.joint import JointVoxelModel
-from src.vertex_appearance.decoder import VertexAppearance, VertexRGB, VertexTwoBases
+from src.vertex_appearance.decoder import VertexAppearance, VertexRGB, VertexTwoBases, VertexBoundedResidual
 from src.vertex_appearance.checkpoint import file_digest, layout_fingerprint, load_checkpoint
 from viz import SVRasterViewer
 
@@ -35,11 +35,16 @@ def load_viewer(checkpoint, geometry_checkpoint=None):
         model = SparseVoxelModel(**dict(config.model))
         geometry = geometry_checkpoint or appearance['geometry_checkpoint']
         model.load(geometry)
-        if state['mode'] == 'vertex_two_bases':
+        if state['mode'] == 'vertex_two_bases_bounded':
+            module = VertexBoundedResidual(model.num_grid_pts, model.num_voxels, appearance.get('eta', 0.25)).cuda()
+        elif state['mode'] == 'vertex_two_bases':
             module = VertexTwoBases(model.num_grid_pts, model.num_voxels).cuda()
         else:
-            kind = VertexAppearance if state['mode'] == 'vertex_trilinear_fourier3' else VertexRGB
-            module = kind(model.num_grid_pts).cuda()
+            if state["mode"] == "vertex_trilinear_fourier3":
+                width = appearance.get("appearance", {}).get("feature_dim", 8)
+                module = VertexAppearance(model.num_grid_pts, feature_dim=width).cuda()
+            else:
+                module = VertexRGB(model.num_grid_pts).cuda()
         if "frozen_sh0" in state:
             with torch.no_grad():
                 model._sh0.copy_(state["frozen_sh0"])
@@ -63,7 +68,9 @@ class VertexViewer(SVRasterViewer):
         self.vertex_module = module
         super().__init__(config,model=model,camera_pack=cameras)
         self.active_sh_degree_slider.visible = False
-        if isinstance(module, VertexTwoBases):
+        if isinstance(module, VertexBoundedResidual):
+            self.vertex_label = "Vertex-MLP (bounded residual)"
+        elif isinstance(module, VertexTwoBases):
             self.vertex_label = "Vertex-MLP (2 bases)"
         else:
             self.vertex_label = 'Vertex-RGB' if isinstance(module, VertexRGB) else 'Vertex-MLP'

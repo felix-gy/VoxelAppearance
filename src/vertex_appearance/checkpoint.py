@@ -46,8 +46,9 @@ def load_checkpoint(path, module, identity, optimizer=None, generator=None):
     state = torch.load(path, map_location='cpu', weights_only=False)
     if state['schema_version'] != 2 or state['identity'] != identity:
         raise ValueError('Appearance checkpoint geometry/layout mismatch')
-    from .decoder import VertexTwoBases
-    if (state["mode"] == "vertex_two_bases") != isinstance(module, VertexTwoBases):
+    modes = ("vertex_two_bases", "vertex_two_bases_bounded")
+    saved_mode = state["mode"] if state["mode"] in modes else None
+    if saved_mode != getattr(module, "appearance_mode", None):
         raise ValueError("Appearance checkpoint mode mismatch")
     module.load_state_dict(state['vertex_module'])
     if optimizer is not None:

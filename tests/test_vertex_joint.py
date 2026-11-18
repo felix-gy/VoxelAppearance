@@ -18,8 +18,10 @@ def joint_scene():
     return model,camera
 
 
-def test_activation_preserves_rng_and_zero_render():
+@pytest.mark.parametrize("mode", ["vertex_mlp", "vertex_two_bases"])
+def test_activation_preserves_rng_and_zero_render(mode):
     m,c=joint_scene()
+    m.appearance_mode = mode
     ref=m.render(c)['color'].detach()
     rng=torch.get_rng_state().clone()
     assert m.activate_vertex()
@@ -30,6 +32,17 @@ def test_activation_preserves_rng_and_zero_render():
     assert m._geo_grid_pts.grad.abs().sum()>0
     assert m._sh0.grad.abs().sum()>0
     assert m._subdiv_p.grad is not None
+    if mode == "vertex_two_bases":
+        module = m.vertex_module
+        assert module.mix.grad[:, 1].abs().sum() > 0
+        grad = module.decoder[-1].weight.grad
+        assert grad[:3].abs().sum() > 0
+        assert grad[3:].count_nonzero() == 0
+        with torch.no_grad():
+            module.mix.add_(module.mix.grad, alpha=-0.1)
+        module.zero_grad()
+        m.render(c)['color'].mean().backward()
+        assert module.decoder[-1].weight.grad[3:].abs().sum() > 0
 
 
 def test_joint_regularizers_match_sh0_at_zero_residual():
@@ -65,13 +78,23 @@ def test_joint_sh0_mask_and_finite_difference():
         torch.testing.assert_close(analytical,(plus-minus)/(2*eps),atol=1e-4,rtol=1e-2)
 
 
-def test_adaptation_preserves_keys_and_decoder():
-    m,c=joint_scene();m.activate_vertex()
+@pytest.mark.parametrize("mode", ["vertex_mlp", "vertex_two_bases"])
+def test_adaptation_preserves_keys_and_decoder(mode):
+    m,c=joint_scene()
+    m.appearance_mode = mode
+    m.activate_vertex()
     keys=m.grid_pts_key.clone()
     values=m.vertex_module.vertex_features.detach().clone()
     decoder={k:v.clone() for k,v in m.vertex_module.decoder.state_dict().items()}
     mask=torch.zeros(m.num_voxels,dtype=torch.bool,device='cuda');mask[0]=True
+    if mode == "vertex_two_bases":
+        mix = m.vertex_module.mix
+        with torch.no_grad():
+            mix.copy_(torch.arange(mix.numel(), device=mix.device).view_as(mix))
+        expected = torch.cat((mix[~mask], mix[mask].repeat_interleave(8, dim=0)))
     m.subdividing(mask)
+    if mode == "vertex_two_bases":
+        torch.testing.assert_close(m.vertex_module.mix, expected)
     for key,value in zip(keys,values):
         found=(m.grid_pts_key==key).all(1)
         if found.any():
@@ -80,6 +103,8 @@ def test_adaptation_preserves_keys_and_decoder():
         torch.testing.assert_close(m.vertex_module.decoder.state_dict()[k],v,atol=0,rtol=0)
     mask=torch.zeros(m.num_voxels,dtype=torch.bool,device='cuda');mask[-1]=True
     m.pruning(mask)
+    if mode == "vertex_two_bases":
+        torch.testing.assert_close(m.vertex_module.mix, expected[~mask])
     assert m.vertex_module.vertex_features.shape==(m.num_grid_pts,8)
     assert torch.isfinite(m.render(c)['color']).all()
 
@@ -103,7 +128,8 @@ def test_joint_checkpoint_and_rng_resume(tmp_path):
     assert n.joint_training_state['iteration']==1000
 
 
-def test_real_trainer_boundary_adaptation_and_resume(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["vertex_mlp", "vertex_two_bases"])
+def test_real_trainer_boundary_adaptation_and_resume(mode, tmp_path, monkeypatch):
     import train
     from argparse import Namespace
     from src.config import cfg as defaults
@@ -131,7 +157,7 @@ def test_real_trainer_boundary_adaptation_and_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(train,'DataPack',Pack)
     monkeypatch.setattr(train,'decide_main_bounding',lambda **kwargs: torch.tensor([[-1.,-1.,-1.],[1.,1.,1.]],device='cuda'))
     monkeypatch.setattr(train,'training_report',lambda **kwargs:None)
-    args=Namespace(appearance_mode='vertex_mlp',load_iteration=None,model_path=str(tmp_path),
+    args=Namespace(appearance_mode=mode,load_iteration=None,model_path=str(tmp_path),
                    load_optimizer=False,save_optimizer=False,save_quantized=False,
                    checkpoint_iterations=[1,999,1000,1001],test_iterations=[],pg_view_every=0)
     seed_everything(3721)

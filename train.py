@@ -79,12 +79,14 @@ def training(args):
 
     # Init voxel model
     model_class = SparseVoxelModel
-    if args.appearance_mode == 'vertex_mlp':
+    if args.appearance_mode in ('vertex_mlp', 'vertex_two_bases'):
         from src.vertex_appearance.joint import JointVoxelModel
         model_class = JointVoxelModel
         if cfg.model.n_samp_per_vox != 1 or args.save_quantized:
             raise ValueError('Vertex joint mode requires one sample and float32 checkpoints')
+    joint_options = dict(appearance_mode=args.appearance_mode) if model_class is not SparseVoxelModel else {}
     voxel_model = model_class(
+        **joint_options,
         n_samp_per_vox=cfg.model.n_samp_per_vox,
         sh_degree=cfg.model.sh_degree,
         ss=cfg.model.ss,
@@ -109,7 +111,7 @@ def training(args):
             cameras=tr_cams,
         )
 
-    joint = args.appearance_mode == 'vertex_mlp'
+    joint = args.appearance_mode in ('vertex_mlp', 'vertex_two_bases')
     if joint:
         if not loaded_iter:
             config_path = os.path.join(args.model_path, 'config.yaml')
@@ -590,7 +592,7 @@ if __name__ == "__main__":
         "You can specify a list of config files to overwrite the default setups."
         "All config fields can also be overwritten by command line.")
     parser.add_argument('--model_path')
-    parser.add_argument('--appearance_mode', choices=['sh', 'vertex_mlp'], default='sh')
+    parser.add_argument('--appearance_mode', choices=['sh', 'vertex_mlp', 'vertex_two_bases'], default='sh')
     parser.add_argument('--cfg_files', default=[], nargs='*')
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="*", type=int, default=[-1])
@@ -603,11 +605,13 @@ if __name__ == "__main__":
     args, cmd_lst = parser.parse_known_args()
 
     # Update config from files and command line
-    if args.appearance_mode == 'vertex_mlp' and args.load_iteration is not None:
+    if args.appearance_mode in ('vertex_mlp', 'vertex_two_bases') and args.load_iteration is not None:
         if args.cfg_files or cmd_lst:
             raise ValueError('Joint resume uses its saved config; omit config overrides')
         path = os.path.join(args.model_path, 'checkpoints', f'iter{args.load_iteration:06d}_model.pt')
         saved = torch.load(path, map_location='cpu', weights_only=False)
+        if saved['vertex_joint'].get('appearance_mode', 'vertex_mlp') != args.appearance_mode:
+            raise ValueError('Checkpoint appearance mode differs from --appearance_mode')
         from yacs.config import CfgNode
         cfg.merge_from_other_cfg(CfgNode.load_cfg(saved['vertex_joint']['config']))
     else:

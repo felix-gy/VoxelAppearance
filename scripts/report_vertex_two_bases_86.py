@@ -32,7 +32,7 @@ def report(root, out):
         "# Vertex-MLP con 86 cámaras y suavizado de coeficientes", "",
         f"**Hitos completos: {len(rows)}/24.**", "",
         "## Protocolo", "",
-        "Rama `Vertex-MLP-Dos-Bases`. Se comparan una base, dos bases y dos bases con penalización. Cada brazo usa las primeras 86 cámaras de entrenamiento por nombre y las mismas cuatro reservadas de la prueba anterior, en orden cíclico, a 256×256, fondo blanco, ss=1 y una muestra por vóxel.",
+        "Rama `Vertex-MLP-Dos-Bases`, RTX 3060. Se comparan una base, dos bases y dos bases con penalización. Cada brazo usa las primeras 86 cámaras de entrenamiento por nombre y las mismas cuatro reservadas de la prueba anterior, en orden cíclico, a 256×256, fondo blanco, ss=1 y una muestra por vóxel.",
         "",
         "Las semillas son 3721 y 3722. En Materials T, ambos brazos de dos bases y el control de una base arrancan del Vertex-MLP histórico de 300 pasos de la semilla correspondiente y congelan su mismo SH0. Los pasos de las tablas son actualizaciones adicionales para Materials T. En Lego se congela el checkpoint SH 20.000 de `out/lego-original` y cada semilla parte de la inicialización compartida de una base.",
         "",
@@ -114,7 +114,11 @@ def report(root, out):
                      f"{values['psnr']:+.4f} dB, {values['ssim']:+.6f} SSIM y "
                      f"{values['lpips']:+.6f} LPIPS.")
 
-    lines += ["", "## Artefactos y reproducción", "",
+    lines += ["", "## Implementación y validación", "",
+              "`neighbors.py` localiza vecinos del mismo nivel y crea la penalización diferenciable. El entrenador congelado admite un término opcional que se suma al MSE. El brazo regularizado conserva la arquitectura de dos bases y el formato de apariencia. Los checkpoints conservan la configuración de muestreo y permiten reproducir la secuencia al reanudar.",
+              "",
+              "Pasaron 25 pruebas CUDA, incluidas las regresiones de Vertex-MLP y la nueva prueba de gradiente de la penalización. En cada experimento se comprobó identidad del render inicial con tolerancia 1e−5 y se verificó el contador de Adam de cada tensor entrenable en cada hito.",
+              "", "## Artefactos y reproducción", "",
               "Cada hito publica un JSON por brazo con las cuatro métricas, resultados por cámara y el pico de entrenamiento del tramo. Los checkpoints incluyen apariencia, identidad, SH0 congelado y estado Adam. `paired.csv` y `paired-per-view.csv` contienen los deltas por semilla y por cámara.",
               "", "```bash",
               'export PYTHONPATH="$PWD/cuda:$PWD${PYTHONPATH:+:$PYTHONPATH}"',

@@ -13,10 +13,10 @@ def fourier_direction_3bands(d):
 
 
 class VertexAppearance(nn.Module):
-    def __init__(self, num_vertices):
+    def __init__(self, num_vertices, feature_dim=8):
         super().__init__()
-        self.vertex_features = nn.Parameter(torch.randn(num_vertices, 8) * 0.01)
-        self.decoder = nn.Sequential(nn.Linear(26, 64), nn.ReLU(), nn.Linear(64, 3))
+        self.vertex_features = nn.Parameter(torch.randn(num_vertices, feature_dim) * 0.01)
+        self.decoder = nn.Sequential(nn.Linear(feature_dim + 18, 64), nn.ReLU(), nn.Linear(64, 3))
         nn.init.zeros_(self.decoder[-1].weight)
         nn.init.zeros_(self.decoder[-1].bias)
 
@@ -31,6 +31,7 @@ class VertexAppearance(nn.Module):
 
 
 class VertexTwoBases(VertexAppearance):
+    appearance_mode = "vertex_two_bases"
     def __init__(self, num_vertices, num_voxels):
         super().__init__(num_vertices)
         self.decoder[-1] = nn.Linear(64, 6)
@@ -38,9 +39,20 @@ class VertexTwoBases(VertexAppearance):
             self.decoder[-1].weight[:3].zero_()
             self.decoder[-1].weight[3:].normal_(std=0.01)
             self.decoder[-1].bias.zero_()
-        mix = torch.zeros(num_voxels, 2)
-        mix[:, 0] = 1
-        self.mix = nn.Parameter(mix)
+        self._initialize_voxel_parameters(num_voxels)
+
+    def _initialize_voxel_parameters(self, num_voxels):
+        self.mix = nn.Parameter(torch.zeros(num_voxels, 2))
+        with torch.no_grad():
+            self._reset_voxel_parameters()
+
+    def _reset_voxel_parameters(self):
+        self.mix[:, 0].fill_(1)
+        self.mix[:, 1].zero_()
+
+    @property
+    def voxel_parameter(self):
+        return self.mix
 
     @torch.no_grad()
     def initialize_first_basis(self, weights):
@@ -49,8 +61,7 @@ class VertexTwoBases(VertexAppearance):
         self.decoder[0].bias.copy_(weights["decoder.0.bias"])
         self.decoder[-1].weight[:3].copy_(weights["decoder.2.weight"])
         self.decoder[-1].bias[:3].copy_(weights["decoder.2.bias"])
-        self.mix[:, 0].fill_(1)
-        self.mix[:, 1].zero_()
+        self._reset_voxel_parameters()
 
     def forward(self, vertex_xyz, camera_origin, vertex_indices=None):
         return super().forward(vertex_xyz, camera_origin, vertex_indices).unflatten(-1, (2, 3))
@@ -59,6 +70,33 @@ class VertexTwoBases(VertexAppearance):
         mix = self.mix if voxel_indices is None else self.mix[voxel_indices]
         first = bases[:, 0][keys] * mix[:, 0, None, None]
         return torch.addcmul(first, bases[:, 1][keys], mix[:, 1, None, None])
+
+
+class VertexBoundedResidual(VertexTwoBases):
+    appearance_mode = "vertex_two_bases_bounded"
+
+    def __init__(self, num_vertices, num_voxels, eta=0.25):
+        if not math.isfinite(eta) or eta <= 0:
+            raise ValueError("eta must be finite and positive")
+        super().__init__(num_vertices, num_voxels)
+        self.register_buffer("eta", torch.tensor(eta, dtype=torch.float32))
+
+    def _initialize_voxel_parameters(self, num_voxels):
+        self.voxel_gate = nn.Parameter(torch.zeros(num_voxels))
+
+    def _reset_voxel_parameters(self):
+        self.voxel_gate.zero_()
+
+    @property
+    def voxel_parameter(self):
+        return self.voxel_gate
+
+    def correction_input(self, bases, keys, voxel_indices=None):
+        gate = self.voxel_gate if voxel_indices is None else self.voxel_gate[voxel_indices]
+        return gate[:, None, None] * bases[:, 1][keys]
+
+    def voxel_residual(self, bases, keys, voxel_indices=None):
+        return bases[:, 0][keys] + self.eta * self.correction_input(bases, keys, voxel_indices).tanh()
 
 
 class VertexRGB(nn.Module):

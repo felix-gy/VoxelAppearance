@@ -8,13 +8,14 @@ import torch
 from torch import nn
 from src.sparse_voxel_model import SparseVoxelModel
 from src.sparse_voxel_gears.adaptive import agg_voxel_into_grid_pts, subdivide_by_interp
-from .decoder import VertexAppearance
+from .decoder import VertexAppearance, VertexTwoBases
 from .checkpoint import layout_fingerprint
 
 
 class JointVoxelModel(SparseVoxelModel):
-    def __init__(self, **kwargs):
+    def __init__(self, appearance_mode="vertex_mlp", **kwargs):
         super().__init__(**kwargs)
+        self.appearance_mode = appearance_mode
         self.vertex_module = None
         self.joint_training_state = None
         self.joint_config = None
@@ -24,7 +25,10 @@ class JointVoxelModel(SparseVoxelModel):
             return False
         # Initializing the replacement must not consume the baseline's RNG stream.
         with torch.random.fork_rng():
-            self.vertex_module = VertexAppearance(self.num_grid_pts).cuda()
+            if self.appearance_mode == "vertex_two_bases":
+                self.vertex_module = VertexTwoBases(self.num_grid_pts, self.num_voxels).cuda()
+            else:
+                self.vertex_module = VertexAppearance(self.num_grid_pts).cuda()
         self.active_sh_degree = 0
         self._shs.requires_grad_(False)
         self._shs.grad = None
@@ -57,8 +61,10 @@ class JointVoxelModel(SparseVoxelModel):
         super().reset_sh_from_cameras(cameras)
         if self.vertex_module is not None:
             with torch.no_grad():
-                self.vertex_module.decoder[-1].weight.zero_()
-                self.vertex_module.decoder[-1].bias.zero_()
+                self.vertex_module.decoder[-1].weight[:3].zero_()
+                self.vertex_module.decoder[-1].bias[:3].zero_()
+                if isinstance(self.vertex_module, VertexTwoBases):
+                    self.vertex_module._reset_voxel_parameters()
 
     @torch.no_grad()
     def _adapt_vertex(self, mask, subdivide):
@@ -67,6 +73,11 @@ class JointVoxelModel(SparseVoxelModel):
         mask = mask.reshape(-1)
         if (subdivide and not mask.any()) or (not subdivide and mask.all()):
             return
+        if isinstance(self.vertex_module, VertexTwoBases):
+            old_mix = self.vertex_module.mix.detach()
+            mix = old_mix[~mask]
+            if subdivide:
+                mix = torch.cat((mix, old_mix[mask].repeat_interleave(8, dim=0)))
         keys = self.grid_pts_key.clone()
         old = self.vertex_module.vertex_features.detach()
         values = old[self.vox_key]
@@ -87,6 +98,8 @@ class JointVoxelModel(SparseVoxelModel):
         valid = source >= 0
         features[valid] = old[source[valid]]
         self.vertex_module.vertex_features = nn.Parameter(features)
+        if isinstance(self.vertex_module, VertexTwoBases):
+            self.vertex_module.mix = nn.Parameter(mix)
 
     def pruning(self, mask):
         return self._adapt_vertex(mask, False)
@@ -104,7 +117,7 @@ class JointVoxelModel(SparseVoxelModel):
             super().save(temporary, quantize=False)
             payload = torch.load(temporary, map_location='cpu', weights_only=False)
             payload['vertex_joint'] = dict(
-                schema_version=1, active=self.vertex_module is not None,
+                schema_version=1, appearance_mode=self.appearance_mode, active=self.vertex_module is not None,
                 module=None if self.vertex_module is None else {k:v.detach().cpu() for k,v in self.vertex_module.state_dict().items()},
                 layout=layout_fingerprint(self), config=self.joint_config,
                 training=self.joint_training_state,
@@ -126,6 +139,9 @@ class JointVoxelModel(SparseVoxelModel):
         self.vertex_module = None
         if layout_fingerprint(self) != joint['layout']:
             raise ValueError('Joint checkpoint layout mismatch')
+        self.appearance_mode = joint.get('appearance_mode', 'vertex_mlp')
+        if self.appearance_mode not in ('vertex_mlp', 'vertex_two_bases'):
+            raise ValueError('Unknown joint checkpoint appearance mode')
         if joint['active']:
             self.activate_vertex()
             self.vertex_module.load_state_dict(joint['module'])

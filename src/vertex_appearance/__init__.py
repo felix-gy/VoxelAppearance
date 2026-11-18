@@ -1,1 +1,1 @@
-from .decoder import VertexAppearance, VertexRGB, VertexTwoBases, fourier_direction_3bands
+from .decoder import VertexAppearance, VertexRGB, VertexTwoBases, VertexBoundedResidual, fourier_direction_3bands

@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import yaml
 from PIL import Image
-from .decoder import VertexAppearance, VertexRGB, VertexTwoBases
+from .decoder import VertexAppearance, VertexRGB, VertexTwoBases, VertexBoundedResidual
 from .checkpoint import file_digest, layout_fingerprint, save_checkpoint, load_checkpoint
 
 
@@ -19,7 +19,7 @@ def parser():
     p.add_argument('--resume')
     p.add_argument('--appearance-checkpoint')
     p.add_argument('--geometry-checkpoint')
-    p.add_argument('--mode', choices=['vertex_trilinear_fourier3', 'vertex_rgb_trilinear', 'vertex_two_bases'])
+    p.add_argument('--mode', choices=['vertex_trilinear_fourier3', 'vertex_rgb_trilinear', 'vertex_two_bases', 'vertex_two_bases_bounded'])
     return p
 
 
@@ -37,14 +37,19 @@ def setup(args):
     for key in ('steps', 'mode', 'geometry_checkpoint'):
         if getattr(args, key, None) is not None:
             config[key] = getattr(args, key)
-    if config['mode'] not in ('vertex_trilinear_fourier3', 'vertex_rgb_trilinear', 'vertex_two_bases'):
+    if config['mode'] not in ('vertex_trilinear_fourier3', 'vertex_rgb_trilinear', 'vertex_two_bases', 'vertex_two_bases_bounded'):
         raise ValueError('Unsupported appearance mode')
     if config['steps'] < 1 or min(config['validation_interval'], config['checkpoint_interval']) < 1:
         raise ValueError('Steps and intervals must be positive')
-    expected_appearance = dict(feature_dim=8, frequencies_pi=[1.0,2.0,4.0],
+    feature_dim = config.get("appearance", {}).get("feature_dim", 8)
+    if type(feature_dim) is not int or feature_dim < 1 or (
+        config["mode"] != "vertex_trilinear_fourier3" and feature_dim != 8
+    ):
+        raise ValueError("Invalid Vertex-MLP feature width")
+    expected_appearance = dict(feature_dim=feature_dim, frequencies_pi=[1.0,2.0,4.0],
                                fourier_order='frequency_sin_xyz_cos_xyz',
                                include_raw_direction=False, direction='camera_to_vertex_world',
-                               layers=[26,64,6 if config['mode'] == 'vertex_two_bases' else 3], dtype='float32')
+                               layers=[feature_dim + 18,64,6 if config['mode'] in ('vertex_two_bases', 'vertex_two_bases_bounded') else 3], dtype='float32')
     if config.get('appearance', expected_appearance) != expected_appearance:
         raise ValueError('This version requires the exact Fourier-3 architecture')
     config['appearance'] = expected_appearance
@@ -62,11 +67,15 @@ def setup(args):
     for key in ('_geo_grid_pts', '_sh0', '_shs', '_subdiv_p'):
         getattr(model, key).requires_grad_(False)
     model.freeze_vox_geo()
-    if config['mode'] == 'vertex_two_bases':
+    if config['mode'] == 'vertex_two_bases_bounded':
+        module = VertexBoundedResidual(model.num_grid_pts, model.num_voxels, config.get('eta', 0.25)).cuda()
+    elif config['mode'] == 'vertex_two_bases':
         module = VertexTwoBases(model.num_grid_pts, model.num_voxels).cuda()
     else:
-        kind = VertexAppearance if config['mode'] == 'vertex_trilinear_fourier3' else VertexRGB
-        module = kind(model.num_grid_pts).cuda()
+        if config["mode"] == "vertex_trilinear_fourier3":
+            module = VertexAppearance(model.num_grid_pts, feature_dim=feature_dim).cuda()
+        else:
+            module = VertexRGB(model.num_grid_pts).cuda()
     if args.appearance_checkpoint or args.resume:
         if "frozen_sh0" in saved:
             model._sh0.copy_(saved["frozen_sh0"])
@@ -134,7 +143,7 @@ def train(args):
               if isinstance(module, VertexAppearance) else
               [dict(params=module.parameters(), lr=config['lr_vertex_features'])])
     if isinstance(module, VertexTwoBases):
-        groups.append(dict(params=[module.mix], lr=config.get("lr_mix", config["lr_vertex_features"])))
+        groups.append(dict(params=[module.voxel_parameter], lr=config.get("lr_mix", config["lr_vertex_features"])))
     comparison = config.get("comparison")
     betas = tuple(comparison["betas"]) if comparison else (0.9, 0.99)
     eps = comparison["eps"] if comparison else 1e-8
@@ -163,8 +172,8 @@ def train(args):
     penalty = None
     if comparison and comparison.get("coefficient_penalty"):
         from .neighbors import coefficient_penalty
-        if not isinstance(module, VertexTwoBases):
-            raise ValueError("Coefficient regularization requires two bases")
+        if type(module) is not VertexTwoBases:
+            raise ValueError("Coefficient regularization requires free two-basis coefficients")
         penalty, _ = coefficient_penalty(model, **comparison["coefficient_penalty"])
     for step, loss in fit(model, module, cameras, camera_order, optimizer, start, config["steps"],
                           ssim_weight=0. if comparison else base["regularizer"]["lambda_ssim"],
