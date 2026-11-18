@@ -23,7 +23,11 @@ def load_viewer(checkpoint, geometry_checkpoint=None):
     is_joint = 'vertex_joint' in state
     if is_joint:
         config.merge_from_other_cfg(CfgNode.load_cfg(state['vertex_joint']['config']))
-        model = JointVoxelModel(**dict(config.model))
+        model_class = JointVoxelModel
+        if state["vertex_joint"].get("kernel") == "vertex_rbf_iq":
+            from src.vertex_appearance.rbf import RBFJointModel
+            model_class = RBFJointModel
+        model = model_class(**dict(config.model))
         model.load(checkpoint)
         module = model.vertex_module
     else:
@@ -56,8 +60,10 @@ class VertexViewer(SVRasterViewer):
         self.vertex_module = module
         super().__init__(config,model=model,camera_pack=cameras)
         self.active_sh_degree_slider.visible = False
-        self.vertex_label = 'Vertex-RGB' if isinstance(module, VertexRGB) else 'Vertex-MLP'
+        self.vertex_label = ('Vertex-MLP + RBF-IQ' if hasattr(module,'rbf_log_scales') else ('Vertex-RGB' if isinstance(module, VertexRGB) else 'Vertex-MLP'))
         modes = ['SH0'] if module is None else [self.vertex_label,'SH0']
+        if hasattr(module,'rbf_log_scales'):
+            modes.insert(1,'Vertex-MLP trilineal')
         if not is_joint and model.shs.shape[1] >= 15:
             modes.append('SH3')
         self.appearance = self.server.gui.add_dropdown('Appearance',options=modes,initial_value=modes[0])
@@ -72,6 +78,8 @@ class VertexViewer(SVRasterViewer):
         if selected == 'n':
             options['output_normal'] = True
         options.pop('color_mode',None)
+        if self.appearance.value == 'Vertex-MLP trilineal':
+            return self.voxel_model.render_vertex(camera,self.vertex_module,interpolation='trilinear',**options)
         if self.appearance.value == self.vertex_label:
             return self.voxel_model.render_vertex(camera,self.vertex_module,**options)
         options['color_mode'] = 'sh3' if self.appearance.value == 'SH3' else 'sh0'

@@ -104,7 +104,7 @@ class JointVoxelModel(SparseVoxelModel):
             super().save(temporary, quantize=False)
             payload = torch.load(temporary, map_location='cpu', weights_only=False)
             payload['vertex_joint'] = dict(
-                schema_version=1, active=self.vertex_module is not None,
+                schema_version=1, appearance_spec=getattr(self,"appearance_spec",None), optimization_scope=getattr(self,"optimization_scope","joint"), kernel=getattr(self,"appearance_kernel","vertex_trilinear"), active=self.vertex_module is not None,
                 module=None if self.vertex_module is None else {k:v.detach().cpu() for k,v in self.vertex_module.state_dict().items()},
                 layout=layout_fingerprint(self), config=self.joint_config,
                 training=self.joint_training_state,
@@ -120,8 +120,13 @@ class JointVoxelModel(SparseVoxelModel):
     def load(self, path):
         payload = torch.load(path, map_location='cpu', weights_only=False)
         joint = payload.get('vertex_joint')
+        if joint is not None and joint.get('kernel','vertex_trilinear') != getattr(self,'appearance_kernel','vertex_trilinear'):
+            raise ValueError('Checkpoint appearance kernel mismatch')
         if joint is None or joint.get('schema_version') != 1:
             raise ValueError('Expected a joint checkpoint; use the v2 loader for frozen appearance')
+        expected_spec = getattr(self,'appearance_spec',None)
+        if expected_spec is not None and joint.get('appearance_spec') != expected_spec:
+            raise ValueError('RBF architecture or kernel specification mismatch')
         super().load(path)
         self.vertex_module = None
         if layout_fingerprint(self) != joint['layout']:
@@ -129,6 +134,7 @@ class JointVoxelModel(SparseVoxelModel):
         if joint['active']:
             self.activate_vertex()
             self.vertex_module.load_state_dict(joint['module'])
+        self.optimization_scope = joint.get('optimization_scope','joint')
         self.joint_config = joint['config']
         self.joint_training_state = joint['training']
         if joint.get('priority') is not None:

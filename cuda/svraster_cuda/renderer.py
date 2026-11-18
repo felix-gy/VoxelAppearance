@@ -51,9 +51,9 @@ def rasterize_voxels(
     if raster_settings.n_samp_per_vox > _C.MAX_N_SAMP or raster_settings.n_samp_per_vox < 1:
         raise Exception(f"n_samp_per_vox should be in range [1, {_C.MAX_N_SAMP}].")
 
-    if raster_settings.appearance_mode not in ("original_sh", "vertex_trilinear"):
+    if raster_settings.appearance_mode not in ("original_sh", "vertex_trilinear", "vertex_rbf_iq"):
         raise ValueError("Unknown appearance mode")
-    if raster_settings.appearance_mode == "vertex_trilinear":
+    if raster_settings.appearance_mode in ("vertex_trilinear", "vertex_rbf_iq"):
         if raster_settings.n_samp_per_vox != 1:
             raise ValueError("Vertex appearance requires one sample")
     N = octree_paths.numel()
@@ -110,7 +110,7 @@ def rasterize_voxels(
     if subdiv_p.device != device:
         raise Exception("Device mismatch: subdiv_p.")
 
-    expected = 27 if raster_settings.appearance_mode == "vertex_trilinear" else 3
+    expected = 27 if raster_settings.appearance_mode != "original_sh" else 3
     if rgbs.shape != (N, expected) or rgbs.dtype != torch.float32 or not rgbs.is_contiguous():
         raise ValueError("Invalid RGB buffer shape, dtype or contiguity")
 
@@ -123,6 +123,16 @@ def rasterize_voxels(
             raise Exception("Except gt_color in shape of [3, H, W]")
         if raster_settings.gt_color.device != device:
             raise Exception("Device mismatch.")
+
+    if raster_settings.appearance_mode == "vertex_rbf_iq":
+        from .rbf_renderer import RasterizeRBF
+        eta, keys = vox_params['rbf_eta'], vox_params['rbf_keys']
+        if eta.dtype != torch.float32 or keys.dtype != torch.int64 or eta.shape[1:] != (3,) or keys.shape != (N,8):
+            raise ValueError('Invalid RBF tensor contract')
+        if keys.numel() and (keys.min()<0 or keys.max()>=len(eta)):
+            raise ValueError('RBF index out of range')
+        return RasterizeRBF.apply(raster_settings,geomBuffer,octree_paths,vox_centers,vox_lengths,
+                                 geos,rgbs,subdiv_p,eta.contiguous(),keys.contiguous())
 
     # Involk differentiable voxels rasterization.
     return _RasterizeVoxels.apply(

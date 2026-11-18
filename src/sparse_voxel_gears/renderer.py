@@ -185,13 +185,18 @@ class SVRenderer:
             profile_events["post_end"].record()
         return render_pkg
 
-    def render_vertex(self, camera, vertex_module, joint_training=False, **options):
+    def render_vertex(self, camera, vertex_module, joint_training=False, interpolation=None, **options):
         """Render fixed geometry with per-vertex residual appearance."""
         if options.get("color_mode") not in (None, "sh0"):
             raise ValueError("Vertex appearance requires SH0 base")
         options.pop("color_mode", None)
         if options.get("n_samp_per_vox", self.n_samp_per_vox) != 1:
             raise ValueError("Vertex appearance requires one sample")
+        if interpolation not in (None, 'trilinear', 'rbf_iq'):
+            raise ValueError('Unknown appearance interpolation')
+        use_rbf = hasattr(vertex_module, 'rbf_log_scales') and interpolation != 'trilinear'
+        if interpolation == 'rbf_iq' and not use_rbf:
+            raise ValueError('RBF interpolation requires log scales')
         events = options.get("profile_events")
         if events is not None:
             events["appearance_start"].record()
@@ -206,6 +211,10 @@ class SVRenderer:
             if not joint_training:
                 params = {key: value.detach() for key, value in params.items()}
             params["rgbs"] = torch.cat((params["rgbs"], packed), dim=1).contiguous()
+            if use_rbf:
+                params['rbf_eta'] = vertex_module.rbf_log_scales
+                params['rbf_keys'] = self.vox_key
             return params
-        return self.render(camera, color_mode="sh0", appearance_mode="vertex_trilinear",
+        mode = 'vertex_rbf_iq' if use_rbf else 'vertex_trilinear'
+        return self.render(camera, color_mode="sh0", appearance_mode=mode,
                            vertex_vox_fn=vertex_vox_fn, **options)
