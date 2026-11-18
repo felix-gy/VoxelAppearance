@@ -21,6 +21,8 @@ setup(
                 "src/preprocess.cu",
                 "src/forward.cu",
                 "src/vertex_forward.cu",
+                "src/rbf_forward.cu",
+                "src/rbf_backward.cu",
                 "src/vertex_backward.cu",
                 "src/backward.cu",
                 "src/geo_params_gather.cu",
