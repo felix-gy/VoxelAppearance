@@ -56,3 +56,44 @@ python train_deferred.py --source_model out/ship_0 --source_iteration 5000 \
 python render.py output/mlp-diferida-ship --appearance-mode deferred_mlp --iteration 30
 python train_deferred.py --model_path output/mlp-diferida-ship --resume --steps 1
 ```
+
+### Continuación de Ship hasta el paso 300
+
+El entrenamiento reanudó el checkpoint 30 durante 270 pasos más, con el estado de Adam y la misma secuencia de cámaras restaurados. El hash del layout y los tensores de geometría, densidad y SH superiores coincidieron exactamente entre los pasos 30 y 300.
+
+| Paso | PSNR entrenamiento (dB) | SSIM entrenamiento | PSNR reservado (dB) | SSIM reservado |
+| --- | ---: | ---: | ---: | ---: |
+| 30 | 28,775 | 0,92895 | 24,952 | 0,80872 |
+| 300 | 36,395 | 0,98906 | 23,654 | 0,73713 |
+
+El ajuste de entrenamiento mejoró 7,620 dB mientras que las vistas reservadas perdieron 1,298 dB y 0,07159 SSIM. Esta divergencia es compatible con sobreajuste temprano a las cuatro vistas. Se detuvo el experimento en el paso 300 porque ambas métricas reservadas empeoraron. Con dos puntos de control no se puede determinar en qué paso empezó a empeorar la generalización.
+
+Configuración efectiva del tramo. Checkpoint SH Ship 5000, 570.968 vóxeles, RTX 3060, 256×256, supersampling 1, una muestra de densidad por vóxel y fondo blanco. Se usaron cuatro vistas de entrenamiento en ciclo, en el orden `r_0.png`, `r_1.png`, `r_10.png` y `r_11.png` del split train. La evaluación usó `r_0.png`, `r_1.png`, `r_10.png` y `r_100.png` del split test. Semilla original 3721. Pérdida MSE de peso 1, sin regularizadores adicionales. Adam con LR constante 0,01 para SH0 y 0,00025 para latentes y MLP, betas (0,1, 0,99) y epsilon 1e−15. El entrenador actualiza SH0, ocho latentes por vóxel y la MLP 29→32→32→3.
+
+Checkpoint y mediciones en `output/mlp-diferida-ship`, archivos `checkpoints/iter000300_model.pt`, `milestone_0030.json` y `milestone_0300.json`.
+
+### Materials T hasta el paso 300
+
+Se repitió el protocolo desde `out/materials_t/checkpoints/iter020000_model.pt`. La escena tenía 2.937.583 vóxeles y se evaluó a 256×256 en la RTX 3060, con supersampling 1, fondo blanco y una muestra de densidad por vóxel. Se usaron los mismos nombres de vistas por split y los mismos hiperparámetros que en Ship, incluida la semilla 3721. Adam usó LR 0,01 para SH0 y 0,00025 para latentes y MLP, betas (0,1, 0,99) y epsilon 1e−15. La pérdida fue MSE con peso 1. La comparación de checkpoints confirmó que los tensores congelados y el layout permanecieron idénticos.
+
+| Modo o paso | PSNR entrenamiento (dB) | SSIM entrenamiento | PSNR reservado (dB) | SSIM reservado |
+| --- | ---: | ---: | ---: | ---: |
+| SH0 | — | — | 22,495 | 0,88132 |
+| SH3 | — | — | 26,161 | 0,94832 |
+| 30 | 25,602 | 0,94594 | 22,628 | 0,87892 |
+| 300 | 34,528 | 0,99228 | 22,603 | 0,86011 |
+
+El PSNR reservado varió −0,025 dB y el SSIM reservado cayó 0,01881, mientras que el PSNR de entrenamiento subió 8,926 dB. La ejecución se detuvo en 300. En la evaluación del paso 300, el tiempo completo fue 16,54 ms/fotograma (60,5 FPS), con 0,52 ms de MLP y 1.562,08 MiB de pico asignado por PyTorch. Checkpoints y métricas por hito en `output/mlp-diferida-materials-t/`.
+
+### Materials T con 32 vistas
+
+Se repitió desde el mismo checkpoint SH, con los mismos hiperparámetros y cuatro vistas reservadas. Solo cambió el conjunto de entrenamiento a las primeras 32 vistas por nombre. Se verificó la igualdad de la configuración, el layout y los tensores congelados entre las ejecuciones de 4 y 32 vistas al paso 300.
+
+| Vistas de entrenamiento | Paso | PSNR reservado (dB) | SSIM reservado |
+| ---: | ---: | ---: | ---: |
+| 4 | 30 | 22,628 | 0,87892 |
+| 4 | 300 | 22,603 | 0,86011 |
+| 32 | 30 | 22,648 | 0,88227 |
+| 32 | 300 | 23,133 | 0,87000 |
+
+A 300 pasos, 32 vistas mejoraron ambas métricas frente a 4 vistas (+0,530 dB y +0,00989 SSIM). Dentro de la ejecución de 32 vistas, entre 30 y 300 pasos el PSNR aumentó 0,486 dB y el SSIM cayó 0,01227. No se continuó a 1000 porque las dos métricas reservadas no mejoraron juntas. Con un presupuesto fijo de 300 actualizaciones, el ciclo visita cada cámara 75 veces con cuatro vistas y 9–10 veces con 32. El checkpoint y las mediciones están en `output/mlp-diferida-materials-t-32/`.
