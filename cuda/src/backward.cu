@@ -48,7 +48,8 @@ renderCUDA(
     const float3* __restrict__ vox_centers,
     const float* __restrict__ vox_lengths,
     const float* __restrict__ geos,
-    const float3* __restrict__ rgbs,
+    const float* __restrict__ rgbs,
+    const int channels,
 
     const float* __restrict__ out_T,
     const uint32_t* __restrict__ tile_last,
@@ -232,7 +233,8 @@ renderCUDA(
             collected_vox_l[thread_id] = vox_lengths[vox_id];
             for (int k=0; k<8; ++k)
                 collected_geo_params[thread_id*8 + k] = geos[vox_id*8 + k];
-            collected_rgb[thread_id] = rgbs[vox_id];
+            const float* rgb = rgbs + vox_id * channels;
+            collected_rgb[thread_id] = make_float3(rgb[0], rgb[1], rgb[2]);
         }
         block.sync();
 
@@ -332,6 +334,14 @@ renderCUDA(
             // Recover the blending weight of this voxel.
             T = T / (1.f - alpha);
             const float pt_w = alpha * T;
+
+            if (channels == 11) {
+                const int voxel = collected_vox_id[j];
+                for (int k = 0; k < channels; ++k)
+                    atomicAdd(dL_dvox + voxel * channels + k,
+                              pt_w * dL_dout_color[k * H * W + pix_id]);
+                continue;
+            }
 
             // Propagate gradients to per-voxel colors and keep
             // gradients w.r.t. voxel alpha.
@@ -583,7 +593,8 @@ void render(
     const float3* vox_centers,
     const float* vox_lengths,
     const float* geos,
-    const float3* rgbs,
+    const float* rgbs,
+    const int channels,
 
     const float* out_T,
     const uint32_t* tile_last,
@@ -629,6 +640,7 @@ void render(
         vox_lengths,
         geos,
         rgbs,
+        channels,
 
         out_T,
         tile_last,
@@ -693,16 +705,17 @@ rasterize_voxels_backward(
         AT_ERROR("vox_centers must have dimensions (num_points, 3)");
 
     const int P = vox_centers.size(0);
+    const int channels = rgbs.size(1);
 
     if (P == 0)
     {
         torch::Tensor dL_dgeos = torch::empty({0});
-        torch::Tensor dL_drgbs = torch::empty({0});
+        torch::Tensor dL_drgbs = torch::zeros_like(rgbs);
         torch::Tensor subdiv_p_bw = torch::empty({0});
         return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw);
     }
 
-    torch::Tensor dL_dvox = torch::zeros({P, geos.size(1)+3+1}, vox_centers.options());
+    torch::Tensor dL_dvox = torch::zeros({P, channels == 11 ? channels : geos.size(1)+3+1}, vox_centers.options());
     dim3 tile_grid((image_width + BLOCK_X - 1) / BLOCK_X, (image_height + BLOCK_Y - 1) / BLOCK_Y, 1);
     dim3 block(BLOCK_X, BLOCK_Y, 1);
 
@@ -737,7 +750,8 @@ rasterize_voxels_backward(
         (float3*)(vox_centers.contiguous().data_ptr<float>()),
         vox_lengths.contiguous().data_ptr<float>(),
         geos.contiguous().data_ptr<float>(),
-        (float3*)(rgbs.contiguous().data_ptr<float>()),
+        rgbs.contiguous().data_ptr<float>(),
+        channels,
 
         out_T.contiguous().data_ptr<float>(),
         imgState.tile_last,
@@ -759,6 +773,9 @@ rasterize_voxels_backward(
 
         dL_dvox.contiguous().data_ptr<float>());
     CHECK_CUDA(debug);
+
+    if (channels == 11)
+        return std::make_tuple(torch::Tensor(), dL_dvox, torch::Tensor());
 
     std::vector<torch::Tensor> gradient_lst = dL_dvox.split({geos.size(1), 3, 1}, 1);
     torch::Tensor dL_dgeos = gradient_lst[0].contiguous();

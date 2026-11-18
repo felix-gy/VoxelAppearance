@@ -92,8 +92,12 @@ def rasterize_voxels(
     # Some voxel parameters checking
     if geos.shape != (N, 8):
         raise Exception(f"Expect geos in ({N}, 8) but got", geos.shape)
-    if rgbs.shape[0] != N:
-        raise Exception(f"Expect rgbs in ({N}, 3) but got", rgbs.shape)
+    if rgbs.ndim != 2 or rgbs.shape[0] != N or rgbs.shape[1] not in (3, 11):
+        raise Exception(f"Expect rgbs in ({N}, 3) or ({N}, 11) but got", rgbs.shape)
+    if rgbs.shape[1] == 11 and (geos.requires_grad or subdiv_p.requires_grad or
+                               any((raster_settings.lambda_R_concen, raster_settings.lambda_ascending,
+                                    raster_settings.lambda_dist))):
+        raise ValueError("Deferred rasterization requires frozen geometry and appearance-only loss")
     if subdiv_p.shape[0] != N:
         raise Exception(f"Expect subdiv_p in ({N}, 1) but got", subdiv_p.shape)
 

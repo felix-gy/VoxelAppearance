@@ -10,7 +10,7 @@ import os
 import re
 import torch
 
-from src.utils import octree_utils
+from src.sparse_voxel_gears.deferred import MODE, restore_deferred
 
 class SVInOut:
 
@@ -19,17 +19,9 @@ class SVInOut:
         Save the necessary attributes and parameters for reproducing rendering.
         '''
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        state_dict = {
-            'active_sh_degree': self.active_sh_degree,
-            'scene_center': self.scene_center.data.contiguous(),
-            'inside_extent': self.inside_extent.data.contiguous(),
-            'scene_extent': self.scene_extent.data.contiguous(),
-            'octpath': self.octpath.data.contiguous(),
-            'octlevel': self.octlevel.data.contiguous(),
-            '_geo_grid_pts': self._geo_grid_pts.data.contiguous(),
-            '_sh0': self._sh0.data.contiguous(),
-            '_shs': self._shs.data.contiguous(),
-        }
+        if self.appearance_mode == MODE:
+            raise ValueError("Use save_deferred for deferred appearance models")
+        state_dict = self.model_state()
 
         if quantize:
             quantize_state_dict(state_dict)
@@ -43,6 +35,19 @@ class SVInOut:
         torch.save(state_dict, path)
         self.latest_save_path = path
 
+    def model_state(self):
+        return {
+            'active_sh_degree': self.active_sh_degree,
+            'scene_center': self.scene_center.detach().contiguous(),
+            'inside_extent': self.inside_extent.detach().contiguous(),
+            'scene_extent': self.scene_extent.detach().contiguous(),
+            'octpath': self.octpath.detach().contiguous(),
+            'octlevel': self.octlevel.detach().contiguous(),
+            '_geo_grid_pts': self._geo_grid_pts.detach().contiguous(),
+            '_sh0': self._sh0.detach().contiguous(),
+            '_shs': self._shs.detach().contiguous(),
+        }
+
     def load(self, path):
         '''
         Load the saved models.
@@ -50,6 +55,15 @@ class SVInOut:
         self.loaded_path = path
         state_dict = torch.load(path, map_location="cpu", weights_only=False)
 
+        if self.appearance_mode == MODE:
+            restore_deferred(self, state_dict)
+            return state_dict
+        if "appearance_mode" in state_dict:
+            raise ValueError("Expected SH checkpoint. Select deferred_mlp to load a deferred model.")
+        self.load_model_state(state_dict)
+        return None
+
+    def load_model_state(self, state_dict):
         if state_dict.get('quantized', False):
             dequantize_state_dict(state_dict)
 
@@ -76,18 +90,22 @@ class SVInOut:
         self.save(path, quantize=quantize)
         self.latest_save_iter = iteration
 
-    def load_iteration(self, model_path, iteration=-1):
+    def load_iteration(self, model_path, iteration=-1, *, load_training=False):
         if iteration == -1:
             # Find the maximum iteration if it is -1.
             fnames = os.listdir(os.path.join(model_path, "checkpoints"))
-            loaded_iter = max(int(re.sub("[^0-9]", "", fname)) for fname in fnames)
+            loaded_iter = max(int(m[1]) for fname in fnames
+                              if (m := re.fullmatch(r"iter(\d+)_model\.pt", fname)))
         else:
             loaded_iter = iteration
 
         path = os.path.join(model_path, "checkpoints", f"iter{loaded_iter:06d}_model.pt")
-        self.load(path)
+        checkpoint = self.load(path)
+        if checkpoint is not None and checkpoint["step"] != loaded_iter:
+            raise ValueError("Deferred checkpoint step mismatch")
+        self.loaded_training = checkpoint["training"] if load_training and checkpoint else None
 
-        self.loaded_iter = iteration
+        self.loaded_iter = loaded_iter
 
         return loaded_iter
 

@@ -35,6 +35,8 @@ class SVAdaptive:
         Input:
             @prune_mask      [N] Mask indicating the voxels to prune.
         '''
+        if self.deferred is not None:
+            raise ValueError("Deferred appearance requires fixed topology")
         if len(prune_mask.shape) == 2:
             assert prune_mask.shape[1] == 1
             prune_mask = prune_mask.squeeze(1)
@@ -92,6 +94,8 @@ class SVAdaptive:
             @subdivide_mask  [N] Mask indicating the voxels to subdivide.
         '''
         # Compute voxel index to keep and to subdivided
+        if self.deferred is not None:
+            raise ValueError("Deferred appearance requires fixed topology")
         if len(subdivide_mask.shape) == 2:
             assert subdivide_mask.shape[1] == 1
             subdivide_mask = subdivide_mask.squeeze(1)

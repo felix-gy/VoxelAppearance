@@ -11,6 +11,7 @@ from src.sparse_voxel_gears.properties import SVProperties
 from src.sparse_voxel_gears.renderer import SVRenderer
 from src.sparse_voxel_gears.adaptive import SVAdaptive
 from src.sparse_voxel_gears.io import SVInOut
+from src.sparse_voxel_gears.deferred import MODE, DeferredAppearance
 from src.sparse_voxel_gears.pooling import SVPooling
 
 
@@ -22,6 +23,7 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
                  ss=1.5,                 # Super-sampling rates for anti-aliasing
                  white_background=False, # Assum white background
                  black_background=False, # Assum black background
+                 appearance_mode="sh",
                  ):
         '''
         Setup of the model meta. At this point, no voxel is allocated.
@@ -35,6 +37,10 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
         '''
         super().__init__()
 
+        if appearance_mode not in ("sh", MODE):
+            raise ValueError(f"Unknown appearance mode {appearance_mode}")
+        self.appearance_mode = appearance_mode
+        self.deferred = None
         self.n_samp_per_vox = n_samp_per_vox
         self.max_sh_degree = sh_degree
         self.ss = ss
@@ -65,3 +71,11 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
         self._sh0 = None
         self._shs = None
         self._subdiv_p = None
+
+    def init_deferred(self):
+        self.appearance_mode = MODE
+        self.active_sh_degree = 0
+        self._geo_grid_pts.requires_grad_(False)
+        self._shs.requires_grad_(False)
+        self._subdiv_p.requires_grad_(False)
+        self.deferred = DeferredAppearance(self.num_voxels, self._sh0.device)

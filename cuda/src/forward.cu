@@ -52,7 +52,8 @@ renderCUDA(
     const float3* __restrict__ vox_centers,
     const float* __restrict__ vox_lengths,
     const float* __restrict__ geos,
-    const float3* __restrict__ rgbs,
+    const float* __restrict__ rgbs,
+    const int channels,
 
     uint32_t* __restrict__ tile_last,
     uint32_t* __restrict__ n_contrib,
@@ -135,6 +136,7 @@ renderCUDA(
     __shared__ float3 collected_vox_c[BLOCK_SIZE];
     __shared__ float collected_vox_l[BLOCK_SIZE];
     __shared__ float collected_geo_params[BLOCK_SIZE * 8];
+    float latent[8] = {};
     __shared__ float3 collected_rgb[BLOCK_SIZE];
 
     // Initialize helper variables.
@@ -172,7 +174,8 @@ renderCUDA(
             collected_vox_l[thread_id] = vox_lengths[vox_id];
             for (int k=0; k<8; ++k)
                 collected_geo_params[thread_id*8 + k] = geos[vox_id*8 + k];
-            collected_rgb[thread_id] = rgbs[vox_id];
+            const float* rgb = rgbs + vox_id * channels;
+            collected_rgb[thread_id] = make_float3(rgb[0], rgb[1], rgb[2]);
         }
         block.sync();
 
@@ -255,6 +258,12 @@ renderCUDA(
             // Accumulate to the pixel.
             float pt_w = T * alpha;
             C = C + pt_w * collected_rgb[j];
+            if (channels == 11) {
+                const float* features = rgbs + vox_id * channels + 3;
+                #pragma unroll
+                for (int k = 0; k < 8; ++k)
+                    latent[k] += pt_w * features[k];
+            }
 
             if (need_depth)
             {
@@ -371,6 +380,9 @@ renderCUDA(
         out_color[0 * H * W + pix_id] = C.x + T * bg_color;
         out_color[1 * H * W + pix_id] = C.y + T * bg_color;
         out_color[2 * H * W + pix_id] = C.z + T * bg_color;
+        if (channels == 11)
+            for (int k = 0; k < 8; ++k)
+                out_color[(3 + k) * H * W + pix_id] = latent[k];
         out_T[pix_id] = T;  // Equal to (1 - alpha).
         if (need_depth)
         {
@@ -450,7 +462,8 @@ void render(
     const float3* vox_centers,
     const float* vox_lengths,
     const float* geos,
-    const float3* rgbs,
+    const float* rgbs,
+    const int channels,
 
     uint32_t* tile_last,
     uint32_t* n_contrib,
@@ -484,6 +497,7 @@ void render(
         vox_lengths,
         geos,
         rgbs,
+        channels,
 
         tile_last,
         n_contrib,
@@ -619,6 +633,7 @@ int rasterize_voxels_procedure(
     const float* vox_lengths,
     const float* geos,
     const float* rgbs,
+    const int channels,
 
     float* out_color,
     float* out_depth,
@@ -718,7 +733,8 @@ int rasterize_voxels_procedure(
         (float3*)vox_centers,
         vox_lengths,
         geos,
-        (float3*)rgbs,
+        rgbs,
+        channels,
 
         imgState.tile_last,
         imgState.n_contrib,
@@ -761,19 +777,20 @@ rasterize_voxels(
 {
     if (vox_centers.ndimension() != 2 || vox_centers.size(1) != 3)
         AT_ERROR("vox_centers must have dimensions (num_points, 3)");
-    if (rgbs.ndimension() != 2 || rgbs.size(1) != 3)
-        AT_ERROR("rgbs should be either (num_points, 3)");
+    if (rgbs.ndimension() != 2 || (rgbs.size(1) != 3 && rgbs.size(1) != 11))
+        AT_ERROR("Expected 3 RGB channels or 3 RGB and 8 latent channels");
     if (vox_centers.size(0) != rgbs.size(0))
         AT_ERROR("size mismatch");
 
     const int P = vox_centers.size(0);
+    const int channels = rgbs.size(1);
     const int H = image_height;
     const int W = image_width;
 
     auto float_opts = torch::TensorOptions(torch::kFloat32).device(torch::kCUDA);
     auto byte_opts = torch::TensorOptions(torch::kByte).device(torch::kCUDA);
 
-    torch::Tensor out_color = torch::full({3, H, W}, 0.f, float_opts);
+    torch::Tensor out_color = torch::full({channels, H, W}, 0.f, float_opts);
     torch::Tensor out_depth = need_depth || need_distortion ? torch::full({3, H, W}, 0.f, float_opts) : torch::empty({0});
     torch::Tensor out_normal = need_normal ? torch::full({3, H, W}, 0.f, float_opts) : torch::empty({0});
     torch::Tensor out_T = torch::full({1, H, W}, 0.f, float_opts);
@@ -812,6 +829,7 @@ rasterize_voxels(
             vox_lengths.contiguous().data_ptr<float>(),
             geos.contiguous().data_ptr<float>(),
             rgbs.contiguous().data_ptr<float>(),
+            channels,
 
             out_color.contiguous().data_ptr<float>(),
             out_depth.contiguous().data_ptr<float>(),
@@ -821,6 +839,10 @@ rasterize_voxels(
 
             debug);
 
+    if (P == 0 && channels == 11) {
+        out_T.fill_(1.f);
+        out_color.narrow(0, 0, 3).fill_(bg_color);
+    }
     return std::make_tuple(rendered, binningBuffer, imgBuffer, out_color, out_depth, out_normal, out_T, max_w);
 }
 

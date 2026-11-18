@@ -9,6 +9,7 @@
 import torch
 import svraster_cuda
 
+from src.sparse_voxel_gears.deferred import MODE
 from src.utils.image_utils import resize_rendering
 
 class SVRenderer:
@@ -65,7 +66,12 @@ class SVRenderer:
             active_sh_degree = int(color_mode[2])
             color_mode = "sh"
 
-        if color_mode == "sh":
+        if color_mode == MODE:
+            # Same forward convention as SH evaluation, with the exact clamp derivative.
+            base = 0.28209479177387814 * self.sh0 + 0.5
+            base = torch.where(base > 0, base, 0.)
+            rgbs = torch.cat((base, self.deferred.features), dim=1)
+        elif color_mode == "sh":
             rgbs = svraster_cuda.renderer.SH_eval.apply(
                 active_sh_degree,
                 idx,
@@ -104,11 +110,19 @@ class SVRenderer:
             output_T=False,
             rand_bg=False,
             use_auto_exposure=False,
+            return_deferred_buffers=False,
             **other_opt):
 
         ###################################
         # Pre-processing
         ###################################
+        deferred = self.appearance_mode == MODE and color_mode in (None, MODE)
+        if deferred:
+            if rand_bg:
+                raise ValueError("Deferred appearance requires a deterministic background")
+            color_mode = MODE
+        elif color_mode == MODE or return_deferred_buffers:
+            raise ValueError("Deferred buffers require an initialized deferred model")
         if ss is None:
             ss = self.ss
         w_src, h_src = camera.image_width, camera.image_height
@@ -149,10 +163,18 @@ class SVRenderer:
         ###################################
         # Post-processing and pack output
         ###################################
+        if deferred:
+            color, features = color.split((3, 8), dim=0)
         if rand_bg:
             color = color + T * torch.rand_like(color, requires_grad=False)
         elif not self.white_background and not self.black_background:
             color = color + T * color.mean((1,2), keepdim=True)
+
+        if deferred:
+            base = color
+            opacity = 1 - T
+            direction = camera.compute_rd(wh=(w, h))
+            color = self.deferred(features, base, opacity, direction)
 
         if use_auto_exposure:
             color = camera.auto_exposure_apply(color)
@@ -164,6 +186,9 @@ class SVRenderer:
             'T': T if output_T else None,
             'max_w': max_w,
         }
+
+        if return_deferred_buffers:
+            render_pkg.update(B=base, F=features, A=opacity)
 
         for k in ['color', 'depth', 'normal', 'T']:
             render_pkg[f'raw_{k}'] = render_pkg[k]
