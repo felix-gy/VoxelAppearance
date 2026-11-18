@@ -7,6 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import os
+import random
 import json
 import time
 import uuid
@@ -27,6 +28,7 @@ from src.utils import loss_utils
 
 from src.dataloader.data_pack import DataPack, compute_iter_idx
 from src.sparse_voxel_model import SparseVoxelModel
+from src.sparse_voxel_gears.rbf4_iq_sine import MODE, activate_rbf4
 
 import svraster_cuda
 
@@ -84,11 +86,12 @@ def training(args):
         ss=cfg.model.ss,
         white_background=cfg.model.white_background,
         black_background=cfg.model.black_background,
+        appearance_mode=MODE if args.rbf4_iq_sine else "sh",
     )
 
     if args.load_iteration:
         loaded_iter = voxel_model.load_iteration(
-            args.model_path, args.load_iteration)
+            args.model_path, args.load_iteration, load_training=args.rbf4_iq_sine)
     else:
         loaded_iter = None
         voxel_model.model_init(
@@ -103,7 +106,12 @@ def training(args):
             cameras=tr_cams,
         )
 
+    if args.rbf4_iq_sine and loaded_iter is None:
+        voxel_model.init_rbf_field()
+
     first_iter = loaded_iter if loaded_iter else 1
+    if loaded_iter is not None and args.rbf4_iq_sine:
+        first_iter = loaded_iter + 1
     print(f"Start optmization from iters={first_iter}.")
 
     # Init optimizer
@@ -113,7 +121,7 @@ def training(args):
             [
                 {'params': [voxel_model._geo_grid_pts], 'lr': cfg.optimizer.geo_lr},
                 {'params': [voxel_model._sh0], 'lr': cfg.optimizer.sh0_lr},
-                {'params': [voxel_model._shs], 'lr': cfg.optimizer.shs_lr},
+                {'params': voxel_model.angular_parameters(), 'lr': cfg.optimizer.shs_lr},
             ],
             betas=(cfg.optimizer.optim_beta1, cfg.optimizer.optim_beta2),
             eps=cfg.optimizer.optim_eps)
@@ -125,7 +133,30 @@ def training(args):
         return optimizer, scheduler
 
     optimizer, scheduler = create_trainer()
-    if loaded_iter and args.load_optimizer:
+    if loaded_iter is not None and args.rbf4_iq_sine:
+        state = voxel_model.loaded_training_state
+        if state is None:
+            raise ValueError("RBF4 resumption requires a full training checkpoint")
+        optimizer.load_state_dict(state['optimizer'])
+        scheduler.load_state_dict(state['scheduler'])
+        saved_indices = state['camera_indices']
+        if len(saved_indices) < cfg.procedure.n_iter:
+            if tr_cam_indices[:len(saved_indices)] != saved_indices:
+                raise ValueError("Cannot extend an RBF4 run with a different camera sequence")
+        else:
+            tr_cam_indices = saved_indices
+        if cfg.auto_exposure.enable:
+            for cam, (updated, matrix, offset) in zip(tr_cams, state['exposure'], strict=True):
+                cam.exposure_updated = updated
+                cam._exposure_A = matrix.cuda()
+                cam._exposure_t = offset.cuda()
+        random.setstate(state['rng_python'])
+        np.random.set_state(state['rng_numpy'])
+        torch.set_rng_state(state['rng_torch'])
+        torch.cuda.set_rng_state_all(state['rng_cuda'])
+        voxel_model.loaded_training_state = None
+        del state
+    elif loaded_iter and args.load_optimizer:
         optim_ckpt = torch.load(os.path.join(args.model_path, "optim.pt"))
         optimizer.load_state_dict(optim_ckpt['optim'])
         scheduler.load_state_dict(optim_ckpt['sched'])
@@ -175,7 +206,9 @@ def training(args):
         iter_start.record()
 
         # Increase the degree of SH by one up to a maximum degree
-        if iteration % 1000 == 0:
+        if args.rbf4_iq_sine:
+            activate_rbf4(voxel_model, iteration, optimizer)
+        elif iteration % 1000 == 0:
             voxel_model.sh_degree_add1()
 
         # Recompute sh from cameras
@@ -273,6 +306,8 @@ def training(args):
 
         # Optimizer step
         optimizer.step()
+        if voxel_model.rbf_active:
+            voxel_model.rbf_field.project_scales()
 
         ######################################################
         # Start adaptive voxels pruning and subdividing
@@ -404,8 +439,24 @@ def training(args):
                 ema_psnr=ema_psnr_for_log)
 
             if iteration in args.checkpoint_iterations or iteration == cfg.procedure.n_iter:
-                voxel_model.save_iteration(args.model_path, iteration, quantize=args.save_quantized)
-                if args.save_optimizer:
+                training_state = None
+                if args.rbf4_iq_sine:
+                    training_state = {
+                        'iteration': iteration,
+                        'optimizer': optimizer.state_dict(),
+                        'scheduler': scheduler.state_dict(),
+                        'camera_indices': tr_cam_indices,
+                        'rng_python': random.getstate(),
+                        'rng_numpy': np.random.get_state(),
+                        'rng_torch': torch.get_rng_state(),
+                        'rng_cuda': torch.cuda.get_rng_state_all(),
+                        'exposure': [(cam.exposure_updated, cam._exposure_A.cpu(), cam._exposure_t.cpu())
+                                     for cam in tr_cams] if cfg.auto_exposure.enable else [],
+                    }
+                voxel_model.save_iteration(args.model_path, iteration, quantize=args.save_quantized,
+                                           training_state=training_state)
+                del training_state
+                if args.save_optimizer and not args.rbf4_iq_sine:
                     torch.save(
                         {'optim': optimizer.state_dict(), 'sched': scheduler.state_dict()},
                         os.path.join(args.model_path, "optim.pt"))
@@ -557,10 +608,20 @@ if __name__ == "__main__":
     parser.add_argument("--pg_view_every", type=int, default=200)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--load_iteration", type=int, default=None)
+    parser.add_argument("--rbf4_iq_sine", "--rbf4-iq-sine", action="store_true",
+                        help="Replace higher-order SH with the RBF4 residual from iteration 1000.")
     parser.add_argument("--load_optimizer", action='store_true')
     parser.add_argument("--save_optimizer", action='store_true')
     parser.add_argument("--save_quantized", action='store_true')
     args, cmd_lst = parser.parse_known_args()
+    if args.rbf4_iq_sine and args.save_quantized:
+        parser.error("--rbf4-iq-sine requires full-precision checkpoints")
+
+    if args.rbf4_iq_sine and args.load_iteration is not None:
+        if not args.model_path:
+            parser.error("--model_path is required for RBF4 resumption")
+        if not args.cfg_files:
+            args.cfg_files = [os.path.join(args.model_path, "config.yaml")]
 
     # Update config from files and command line
     update_config(args.cfg_files, cmd_lst)

@@ -19,6 +19,7 @@ from src.config import cfg, update_argparser, update_config
 
 from src.dataloader.data_pack import DataPack
 from src.sparse_voxel_model import SparseVoxelModel
+from src.sparse_voxel_gears.rbf4_iq_sine import MODE
 from src.utils.image_utils import im_tensor2np, viz_tensordepth
 
 
@@ -130,6 +131,7 @@ if __name__ == "__main__":
         description="Sparse voxels raster rendering.")
     parser.add_argument('model_path')
     parser.add_argument("--iteration", default=-1, type=int)
+    parser.add_argument("--rbf4_iq_sine", "--rbf4-iq-sine", action="store_true")
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--eval_fps", action="store_true")
@@ -170,6 +172,7 @@ if __name__ == "__main__":
         ss=cfg.model.ss,
         white_background=cfg.model.white_background,
         black_background=cfg.model.black_background,
+        appearance_mode=MODE if args.rbf4_iq_sine else "sh",
     )
     loaded_iter = voxel_model.load_iteration(args.model_path, args.iteration)
 
