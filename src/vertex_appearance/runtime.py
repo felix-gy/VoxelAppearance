@@ -159,9 +159,11 @@ def benchmark(model, module, cameras, output):
     results = {}
     for mode in ('sh0', 'sh3', 'vertex'):
         names = ('start','end','appearance_start','appearance_end','gather_end',
-                 'raster_start','raster_end','post_end')
+                 'raster_start','raster_end','post_end', 'preprocess_start', 'preprocess_end',
+                 'selection_start')
         events = {name: torch.cuda.Event(enable_timing=True) for name in names}
         times = []
+        per_camera = []
         module.to('cuda' if mode == 'vertex' else 'cpu')
         module.eval()
         torch.cuda.reset_peak_memory_stats()
@@ -170,24 +172,30 @@ def benchmark(model, module, cameras, output):
                 cam = cameras[i % len(cameras)]
                 events['start'].record()
                 if mode == 'vertex':
-                    model.render_vertex(cam, module, profile_events=events)
+                    vertex_stats = {}
+                    model.render_vertex(cam, module, profile_events=events, vertex_stats=vertex_stats)
                 else:
                     model.render(cam, color_mode=mode, profile_events=events)
                 events['end'].record()
                 events['end'].synchronize()
                 if i >= 10:
                     row = dict(total_ms=events['start'].elapsed_time(events['end']),
+                               preprocess_ms=events['preprocess_start'].elapsed_time(events['preprocess_end']),
                                raster_ms=events['raster_start'].elapsed_time(events['raster_end']),
                                postprocess_ms=events['raster_end'].elapsed_time(events['post_end']))
                     if mode == 'vertex':
+                        row['selection_ms'] = events['selection_start'].elapsed_time(events['appearance_start'])
                         row['appearance_ms'] = events['appearance_start'].elapsed_time(events['appearance_end'])
                         row['gather_ms'] = events['appearance_end'].elapsed_time(events['gather_end'])
+                        per_camera.append(dict(camera=i % len(cameras), **vertex_stats))
                     times.append(row)
         avg = {key: sum(row[key] for row in times)/len(times) for key in times[0]}
         avg['fps_total'] = 1000/avg['total_ms']
         avg['peak_allocated_bytes'] = torch.cuda.max_memory_allocated()
+        if per_camera:
+            avg["per_camera"] = list({row["camera"]: row for row in per_camera}.values())
         results[mode] = avg
-    # Isolated decoder stages exclude neither stage from total render latency.
+    # Keep a full-layout decoder microbenchmark as a separate reference.
     if isinstance(module, VertexAppearance):
         totals = {'fourier_ms': [], 'mlp_ms': []}
         with torch.no_grad():

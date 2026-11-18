@@ -172,3 +172,53 @@ def test_layout_validation_rejects_invalid_keys():
     m._vox_key[0,0]=m.num_grid_pts
     with pytest.raises(ValueError,match='out of range'):
         validate_layout(m)
+
+
+@pytest.mark.parametrize("visibility", ["full", "partial", "empty"])
+def test_compact_decoder_matches_dense(visibility):
+    torch.manual_seed(13)
+    model, camera = scene()
+    module = VertexAppearance(model.num_grid_pts).cuda()
+    with torch.no_grad():
+        module.decoder[-1].weight.normal_(0, 0.08)
+
+    if visibility == "partial":
+        for x in (1.5, 2., 2.5, 3., 3.5, 4.):
+            camera.c2w[0, 3] = x
+            camera.w2c = camera.c2w.inverse()
+            stats = {}
+            with torch.no_grad():
+                model.render_vertex(camera, module, vertex_stats=stats)
+            if 0 < stats["decoded_vertices"] < model.num_grid_pts:
+                break
+        else:
+            pytest.fail("Fixture needs a camera with a nonempty vertex subset")
+    elif visibility == "empty":
+        camera.c2w[:3, :3] = torch.diag(camera.c2w.new_tensor([-1., 1., -1.]))
+        camera.w2c = camera.c2w.inverse()
+
+    opts = dict(output_depth=True, output_normal=True, output_T=True)
+    stats = {}
+    seen = []
+    hook = module.decoder.register_forward_pre_hook(lambda _, args: seen.append(len(args[0])))
+    compact = model.render_vertex(camera, module, vertex_stats=stats, **opts)
+    hook.remove()
+    dense = model.render_vertex(camera, lambda xyz, origin: module(xyz, origin), **opts)
+    if visibility == "full":
+        assert stats == dict(candidate_voxels=model.num_voxels, decoded_vertices=model.num_grid_pts)
+    elif visibility == "empty":
+        assert stats == dict(candidate_voxels=0, decoded_vertices=0)
+    else:
+        assert 0 < stats["decoded_vertices"] < model.num_grid_pts
+        assert stats["decoded_vertices"] < stats["candidate_voxels"] * 8
+    assert seen == [stats["decoded_vertices"]]
+
+    for key in ("color", "depth", "normal", "T"):
+        torch.testing.assert_close(compact[key], dense[key], atol=1e-5, rtol=0)
+    parameters = tuple(module.parameters())
+    grad_compact = torch.autograd.grad(compact["color"].mean(), parameters)
+    grad_dense = torch.autograd.grad(dense["color"].mean(), parameters)
+    for a, b in zip(grad_compact, grad_dense):
+        torch.testing.assert_close(a, b, atol=1e-6, rtol=1e-5)
+    if visibility != "full":
+        assert (grad_compact[0] == 0).all(1).sum() >= model.num_grid_pts - stats["decoded_vertices"]

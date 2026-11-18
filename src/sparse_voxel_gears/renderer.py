@@ -141,14 +141,13 @@ class SVRenderer:
             need_normal=output_normal,
             track_max_w=track_max_w,
             **other_opt)
-        if profile_events is not None:
-            profile_events["raster_start"].record()
         color, depth, normal, T, max_w = svraster_cuda.renderer.rasterize_voxels(
             raster_settings,
             self.octpath,
             self.vox_center,
             self.vox_size,
-            vox_fn)
+            vox_fn,
+            profile_events=profile_events)
 
         ###################################
         # Post-processing and pack output
@@ -192,20 +191,43 @@ class SVRenderer:
         options.pop("color_mode", None)
         if options.get("n_samp_per_vox", self.n_samp_per_vox) != 1:
             raise ValueError("Vertex appearance requires one sample")
-        events = options.get("profile_events")
-        if events is not None:
-            events["appearance_start"].record()
-        delta = vertex_module(self.grid_pts_xyz, camera.c2w[:3, 3])
-        if events is not None:
-            events["appearance_end"].record()
-        packed = delta[self.vox_key].reshape(self.num_voxels, 24)
-        if events is not None:
-            events["gather_end"].record()
+        events = options.get("profile_events") or {}
+        stats = options.pop("vertex_stats", None)
+        decode_subset = getattr(vertex_module, "forward_subset", None)
+
+        def record(name):
+            if name in events:
+                events[name].record()
+
         def vertex_vox_fn(idx, cam_pos, color_mode):
+            dense = decode_subset is None or idx.numel() == self.num_voxels
+            record("selection_start")
+            if not dense:
+                candidates = self.vox_key[idx]
+                vertices, inverse = torch.unique(candidates.flatten(), return_inverse=True)
+            record("appearance_start")
+            if dense:
+                delta = vertex_module(self.grid_pts_xyz, cam_pos)
+            else:
+                delta = decode_subset(self.grid_pts_xyz, cam_pos, vertices)
+            record("appearance_end")
+            if dense:
+                residual = delta[self.vox_key].reshape(self.num_voxels, 24)
+            else:
+                residual = delta[inverse].reshape(idx.numel(), 24)
             params = self.vox_fn(idx, cam_pos, "sh0")
             if not joint_training:
                 params = {key: value.detach() for key, value in params.items()}
-            params["rgbs"] = torch.cat((params["rgbs"], packed), dim=1).contiguous()
+            base = params["rgbs"]
+            if dense:
+                params["rgbs"] = torch.cat((base, residual), dim=1)
+            else:
+                packed = torch.cat((base[idx], residual), dim=1)
+                params["rgbs"] = base.new_zeros((self.num_voxels, 27)).index_copy_(0, idx, packed)
+            record("gather_end")
+            if stats is not None:
+                stats.update(candidate_voxels=idx.numel(), decoded_vertices=delta.size(0))
             return params
+
         return self.render(camera, color_mode="sh0", appearance_mode="vertex_trilinear",
                            vertex_vox_fn=vertex_vox_fn, **options)

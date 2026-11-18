@@ -43,6 +43,7 @@ def rasterize_voxels(
         vox_centers: torch.Tensor,
         vox_lengths: torch.Tensor,
         vox_fn,
+        profile_events=None,
     ):
 
     # Some input checking
@@ -68,7 +69,10 @@ def rasterize_voxels(
             vox_lengths.device != device:
         raise Exception("Device mismatch.")
 
+    events = profile_events or {}
     # Preprocess octree
+    if "preprocess_start" in events:
+        events["preprocess_start"].record()
     n_duplicates, geomBuffer = _C.rasterize_preprocess(
         raster_settings.image_width,
         raster_settings.image_height,
@@ -87,6 +91,8 @@ def rasterize_voxels(
         raster_settings.debug,
     )
     in_frusts_idx = torch.where(n_duplicates > 0)[0]
+    if "preprocess_end" in events:
+        events["preprocess_end"].record()
 
     # Forward voxel parameters
     cam_pos = raster_settings.c2w_matrix[:3, 3]
@@ -125,6 +131,8 @@ def rasterize_voxels(
             raise Exception("Device mismatch.")
 
     # Involk differentiable voxels rasterization.
+    if "raster_start" in events:
+        events["raster_start"].record()
     return _RasterizeVoxels.apply(
         raster_settings,
         geomBuffer,
