@@ -9,6 +9,7 @@
 import torch
 import svraster_cuda
 
+from src.sparse_voxel_gears.rbf4_iq_sine import MODE
 from src.utils.image_utils import resize_rendering
 
 class SVRenderer:
@@ -57,6 +58,13 @@ class SVRenderer:
                 self._geo_grid_pts
             )
 
+        # RBF4 needs the original SH0 as its base color.
+        neural = self.rbf_active and color_mode in (None, "sh", MODE)
+        if neural or (self.appearance_mode == MODE and color_mode in (None, "sh")):
+            color_mode = "sh0"
+        if color_mode == MODE:
+            raise ValueError("RBF4 appearance is inactive")
+
         # Compute voxel colors
         if color_mode is None or color_mode == "sh":
             active_sh_degree = self.active_sh_degree
@@ -88,6 +96,8 @@ class SVRenderer:
             'rgbs': rgbs,
             'subdiv_p': self._subdiv_p, # Dummy param to record subdivision priority
         }
+        if neural:
+            vox_params[MODE] = self.rbf_field.raster_tensors(self.vox_key)
         if vox_params['subdiv_p'] is None:
             vox_params['subdiv_p'] = torch.ones([self.num_voxels, 1], device="cuda")
 

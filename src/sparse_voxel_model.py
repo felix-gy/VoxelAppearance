@@ -12,6 +12,7 @@ from src.sparse_voxel_gears.renderer import SVRenderer
 from src.sparse_voxel_gears.adaptive import SVAdaptive
 from src.sparse_voxel_gears.io import SVInOut
 from src.sparse_voxel_gears.pooling import SVPooling
+from src.sparse_voxel_gears.rbf4_iq_sine import MODE, RBF4IQSine
 
 
 class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVInOut, SVPooling):
@@ -22,6 +23,7 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
                  ss=1.5,                 # Super-sampling rates for anti-aliasing
                  white_background=False, # Assum white background
                  black_background=False, # Assum black background
+                 appearance_mode="sh",
                  ):
         '''
         Setup of the model meta. At this point, no voxel is allocated.
@@ -34,6 +36,12 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
            Heuristically initial the sparse grid layout and parameters from the training datas.
         '''
         super().__init__()
+
+        if appearance_mode not in ('sh', MODE):
+            raise ValueError(f"Unknown appearance mode: {appearance_mode}")
+        self.appearance_mode = appearance_mode
+        self.rbf_active = False
+        self.rbf_field = None
 
         self.n_samp_per_vox = n_samp_per_vox
         self.max_sh_degree = sh_degree
@@ -65,3 +73,12 @@ class SparseVoxelModel(SVConstructor, SVProperties, SVRenderer, SVAdaptive, SVIn
         self._sh0 = None
         self._shs = None
         self._subdiv_p = None
+
+    def init_rbf_field(self):
+        self.active_sh_degree = 0
+        self.rbf_field = RBF4IQSine(self.num_grid_pts, self._geo_grid_pts.device)
+
+    def angular_parameters(self):
+        if self.rbf_active:
+            return list(self.rbf_field.parameters())
+        return [self._shs]

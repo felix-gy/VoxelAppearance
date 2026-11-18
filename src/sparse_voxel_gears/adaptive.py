@@ -44,6 +44,9 @@ class SVAdaptive:
             return
 
         old_vox_key = self.vox_key.clone()
+        field = self.rbf_field
+        if field is not None:
+            old_grid_keys = self.grid_pts_key
 
         # Prune non-trainable per-voxel attributes.
         for name in self.per_voxel_attr_lst:
@@ -81,6 +84,8 @@ class SVAdaptive:
                 new_vox_val).requires_grad_()
             setattr(self, name, new_param)
             del ori_grid_pts, ori_vox_grid_pts_val, new_vox_val, new_param
+        if field is not None:
+            field.remap(old_grid_keys, self.grid_pts_key, old_vox_key, self.vox_key, kept_idx)
         torch.cuda.empty_cache()
 
     @torch.no_grad()
@@ -102,6 +107,9 @@ class SVAdaptive:
             return
 
         old_vox_key = self.vox_key.clone()
+        field = self.rbf_field
+        if field is not None:
+            old_grid_keys = self.grid_pts_key
 
         # Subdivide non-trainable per-voxel attributes.
         octpath, octlevel = octree_utils.gen_children(
@@ -172,6 +180,9 @@ class SVAdaptive:
                 new_vox_val).cuda().requires_grad_()
             setattr(self, name, new_param)
             del new_vox_val, new_param
+        if field is not None:
+            field.remap(old_grid_keys, self.grid_pts_key, old_vox_key, self.vox_key,
+                        kept_idx, subdivide_idx)
         torch.cuda.empty_cache()
 
     @torch.no_grad()
