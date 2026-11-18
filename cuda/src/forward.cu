@@ -22,6 +22,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include "forward.h"
 #include "raster_state.h"
 #include "auxiliary.h"
+#include "rbf4_iq_sine.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -37,7 +38,7 @@ namespace FORWARD {
 
 // CUDA sparse voxel rendering.
 template <bool need_depth, bool need_distortion, bool need_normal, bool track_max_w,
-          int n_samp>
+          int n_samp, bool use_rbf>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
     const uint2* __restrict__ ranges,
@@ -53,6 +54,7 @@ renderCUDA(
     const float* __restrict__ vox_lengths,
     const float* __restrict__ geos,
     const float3* __restrict__ rgbs,
+    const rbf4_iq_sine::Field rbf,
 
     uint32_t* __restrict__ tile_last,
     uint32_t* __restrict__ n_contrib,
@@ -106,6 +108,9 @@ renderCUDA(
     rd_norm_inv = 1.f / rd_norm;
     ro = last_col_3x4(c2w_matrix);
     rd = rd_raw * rd_norm_inv;
+    float direction[18];
+    if constexpr (use_rbf)
+        rbf4_iq_sine::direction_encoding(rd, direction);
     rd_inv = {1.f/ rd.x, 1.f / rd.y, 1.f / rd.z};
 
     const uint32_t pix_quad_id = compute_ray_quadrant_id(rd);
@@ -254,7 +259,12 @@ renderCUDA(
 
             // Accumulate to the pixel.
             float pt_w = T * alpha;
-            C = C + pt_w * collected_rgb[j];
+            float3 color = collected_rgb[j];
+            if constexpr (use_rbf) {
+                const float3 midpoint = (ro + (0.5f * (a + b)) * rd - (vox_c - 0.5f * vox_l)) * vox_l_inv;
+                color = rbf4_iq_sine::evaluate_color(rbf, vox_id, midpoint, direction, color);
+            }
+            C = C + pt_w * color;
 
             if (need_depth)
             {
@@ -451,6 +461,7 @@ void render(
     const float* vox_lengths,
     const float* geos,
     const float3* rgbs,
+    const rbf4_iq_sine::Field rbf,
 
     uint32_t* tile_last,
     uint32_t* n_contrib,
@@ -463,12 +474,13 @@ void render(
 {
     const bool track_max_w = (max_w != nullptr);
 
-    const auto kernel_func =
-        (n_samp_per_vox == 3) ?
-            FwRendFunc(3) :
-        (n_samp_per_vox == 2) ?
-            FwRendFunc(2) :
-            FwRendFunc(1) ;
+    const auto select_kernel = [&](auto use_rbf) {
+        return (n_samp_per_vox == 3) ? FwRendFunc(3, decltype(use_rbf)::value) :
+               (n_samp_per_vox == 2) ? FwRendFunc(2, decltype(use_rbf)::value) :
+                                      FwRendFunc(1, decltype(use_rbf)::value);
+    };
+    const auto kernel_func = rbf.keys ? select_kernel(std::true_type{}) :
+                                       select_kernel(std::false_type{});
 
     kernel_func <<<tile_grid, block>>> (
         ranges,
@@ -484,6 +496,7 @@ void render(
         vox_lengths,
         geos,
         rgbs,
+        rbf,
 
         tile_last,
         n_contrib,
@@ -619,6 +632,7 @@ int rasterize_voxels_procedure(
     const float* vox_lengths,
     const float* geos,
     const float* rgbs,
+    const rbf4_iq_sine::Field rbf,
 
     float* out_color,
     float* out_depth,
@@ -719,6 +733,7 @@ int rasterize_voxels_procedure(
         vox_lengths,
         geos,
         (float3*)rgbs,
+        rbf,
 
         imgState.tile_last,
         imgState.n_contrib,
@@ -757,7 +772,8 @@ rasterize_voxels(
 
     const torch::Tensor& geomBuffer,
 
-    const bool debug)
+    const bool debug,
+    const std::vector<torch::Tensor>& rbf_tensors)
 {
     if (vox_centers.ndimension() != 2 || vox_centers.size(1) != 3)
         AT_ERROR("vox_centers must have dimensions (num_points, 3)");
@@ -767,6 +783,7 @@ rasterize_voxels(
         AT_ERROR("size mismatch");
 
     const int P = vox_centers.size(0);
+    const auto rbf = rbf4_iq_sine::make_field(rbf_tensors, rgbs);
     const int H = image_height;
     const int W = image_width;
 
@@ -812,6 +829,7 @@ rasterize_voxels(
             vox_lengths.contiguous().data_ptr<float>(),
             geos.contiguous().data_ptr<float>(),
             rgbs.contiguous().data_ptr<float>(),
+            rbf,
 
             out_color.contiguous().data_ptr<float>(),
             out_depth.contiguous().data_ptr<float>(),

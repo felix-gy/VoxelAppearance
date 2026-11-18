@@ -38,7 +38,8 @@ rasterize_voxels(
 
     const torch::Tensor& geomBuffer,
 
-    const bool debug);
+    const bool debug,
+    const std::vector<torch::Tensor>& rbf_tensors);
 
 }
 

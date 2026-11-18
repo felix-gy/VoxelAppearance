@@ -124,6 +124,7 @@ def rasterize_voxels(
         geos,
         rgbs,
         subdiv_p,
+        *vox_params.get('rbf4_iq_sine', ()),
     )
 
 
@@ -139,6 +140,7 @@ class _RasterizeVoxels(torch.autograd.Function):
         geos,
         rgbs,
         subdiv_p,
+        *rbf_tensors,
     ):
 
         need_distortion = raster_settings.lambda_dist > 0
@@ -168,6 +170,7 @@ class _RasterizeVoxels(torch.autograd.Function):
             geomBuffer,
 
             raster_settings.debug,
+            rbf_tensors,
         )
 
         num_rendered, binningBuffer, imgBuffer, out_color, out_depth, out_normal, out_T, max_w = _C.rasterize_voxels(*args)
@@ -178,7 +181,7 @@ class _RasterizeVoxels(torch.autograd.Function):
         ctx.save_for_backward(
             octree_paths, vox_centers, vox_lengths,
             geos, rgbs,
-            geomBuffer, binningBuffer, imgBuffer, out_T, out_depth, out_normal)
+            geomBuffer, binningBuffer, imgBuffer, out_T, out_depth, out_normal, *rbf_tensors)
         ctx.mark_non_differentiable(max_w)
         return out_color, out_depth, out_normal, out_T, max_w
 
@@ -189,7 +192,7 @@ class _RasterizeVoxels(torch.autograd.Function):
         num_rendered = ctx.num_rendered
         octree_paths, vox_centers, vox_lengths, \
             geos, rgbs, \
-            geomBuffer, binningBuffer, imgBuffer, out_T, out_depth, out_normal = ctx.saved_tensors
+            geomBuffer, binningBuffer, imgBuffer, out_T, out_depth, out_normal, *rbf_tensors = ctx.saved_tensors
 
         args = (
             num_rendered,
@@ -230,9 +233,10 @@ class _RasterizeVoxels(torch.autograd.Function):
             out_normal,
 
             raster_settings.debug,
+            rbf_tensors,
         )
 
-        dL_dgeos, dL_drgbs, subdiv_p_bw = _C.rasterize_voxels_backward(*args)
+        dL_dgeos, dL_drgbs, subdiv_p_bw, rbf_grads = _C.rasterize_voxels_backward(*args)
 
         grads = (
             None, # => raster_settings
@@ -245,6 +249,8 @@ class _RasterizeVoxels(torch.autograd.Function):
             subdiv_p_bw, # => subdivision priority
         )
 
+        if rbf_tensors:
+            grads += (None, *rbf_grads, None)  # Keys, trainable tensors, frequencies.
         return grads
 
 

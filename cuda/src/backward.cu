@@ -22,6 +22,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include "backward.h"
 #include "raster_state.h"
 #include "auxiliary.h"
+#include "rbf4_iq_sine.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -33,7 +34,7 @@ namespace BACKWARD {
 
 // CUDA backward pass of sparse voxel rendering.
 template <bool need_depth, bool need_distortion, bool need_normal,
-          int n_samp>
+          int n_samp, bool use_rbf>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
     const uint2* __restrict__ ranges,
@@ -49,6 +50,8 @@ renderCUDA(
     const float* __restrict__ vox_lengths,
     const float* __restrict__ geos,
     const float3* __restrict__ rgbs,
+    const rbf4_iq_sine::Field rbf,
+    const rbf4_iq_sine::Gradients rbf_grad,
 
     const float* __restrict__ out_T,
     const uint32_t* __restrict__ tile_last,
@@ -109,6 +112,9 @@ renderCUDA(
     const float3 ro = last_col_3x4(c2w_matrix);
     const float3 rd_raw = rotate_3x4(c2w_matrix, cam_rd);
     const float3 rd = rd_raw * rd_norm_inv;
+    float direction[18];
+    if constexpr (use_rbf)
+        rbf4_iq_sine::direction_encoding(rd, direction);
     const float3 rd_inv = {1.f/ rd.x, 1.f / rd.y, 1.f / rd.z};
     uint32_t pix_quad_id = compute_ray_quadrant_id(rd);
 
@@ -338,7 +344,14 @@ renderCUDA(
             // Load from share memory.
             const int vox_id = collected_vox_id[j];
 
-            const float3 c = collected_rgb[j];
+            float3 midpoint;
+            rbf4_iq_sine::Sample sample;
+            float3 c = collected_rgb[j];
+            if constexpr (use_rbf) {
+                midpoint = (ro + (0.5f * (a + b)) * rd - (vox_c - 0.5f * vox_l)) * vox_l_inv;
+                rbf4_iq_sine::evaluate(rbf, vox_id, midpoint, direction, c, sample);
+                c = rbf4_iq_sine::color(sample);
+            }
 
             // The gradients w.r.t. voxel alpha.
             float dL_dpt_w = dot(dL_dpix, c);
@@ -512,6 +525,8 @@ renderCUDA(
             /**************************
             Write back the gradient below.
             **************************/
+            if constexpr (use_rbf)
+                rbf4_iq_sine::backward(rbf, rbf_grad, vox_id, midpoint, sample, dL_drgb);
             float grad_pack[12];
             #pragma unroll
             for (int iii=0; iii<8; ++iii)
@@ -584,6 +599,8 @@ void render(
     const float* vox_lengths,
     const float* geos,
     const float3* rgbs,
+    const rbf4_iq_sine::Field rbf,
+    const rbf4_iq_sine::Gradients rbf_grad,
 
     const float* out_T,
     const uint32_t* tile_last,
@@ -608,12 +625,13 @@ void render(
     const bool need_distortion = (lambda_dist > 0);
 
     // The density_mode now is always EXP_LINEAR_11_MODE
-    const auto kernel_func =
-        (n_samp_per_vox == 3) ?
-            BwRendFunc(3) :
-        (n_samp_per_vox == 2) ?
-            BwRendFunc(2) :
-            BwRendFunc(1) ;
+    const auto select_kernel = [&](auto use_rbf) {
+        return (n_samp_per_vox == 3) ? BwRendFunc(3, decltype(use_rbf)::value) :
+               (n_samp_per_vox == 2) ? BwRendFunc(2, decltype(use_rbf)::value) :
+                                      BwRendFunc(1, decltype(use_rbf)::value);
+    };
+    const auto kernel_func = rbf.keys ? select_kernel(std::true_type{}) :
+                                       select_kernel(std::false_type{});
 
     kernel_func <<<tile_grid, block>>> (
         ranges,
@@ -629,6 +647,8 @@ void render(
         vox_lengths,
         geos,
         rgbs,
+        rbf,
+        rbf_grad,
 
         out_T,
         tile_last,
@@ -651,7 +671,7 @@ void render(
 
 
 // Interface for python to run backward pass of voxel rasterization.
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, std::vector<torch::Tensor>>
 rasterize_voxels_backward(
     const int R,
     const int n_samp_per_vox,
@@ -687,19 +707,30 @@ rasterize_voxels_backward(
     const torch::Tensor& out_D,
     const torch::Tensor& out_N,
 
-    const bool debug)
+    const bool debug,
+    const std::vector<torch::Tensor>& rbf_tensors)
 {
     if (vox_centers.ndimension() != 2 || vox_centers.size(1) != 3)
         AT_ERROR("vox_centers must have dimensions (num_points, 3)");
 
     const int P = vox_centers.size(0);
+    const auto rbf = rbf4_iq_sine::make_field(rbf_tensors, rgbs);
+
+    std::vector<torch::Tensor> rbf_grads;
+    rbf4_iq_sine::Gradients rbf_grad;
+    if (!rbf_tensors.empty()) {
+        for (int i = 1; i <= 4; ++i)
+            rbf_grads.push_back(torch::zeros_like(rbf_tensors[i]));
+        rbf_grad = {rbf_grads[0].data_ptr<float>(), rbf_grads[1].data_ptr<float>(),
+                    rbf_grads[2].data_ptr<float>(), rbf_grads[3].data_ptr<float>()};
+    }
 
     if (P == 0)
     {
-        torch::Tensor dL_dgeos = torch::empty({0});
-        torch::Tensor dL_drgbs = torch::empty({0});
-        torch::Tensor subdiv_p_bw = torch::empty({0});
-        return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw);
+        torch::Tensor dL_dgeos = torch::zeros_like(geos);
+        torch::Tensor dL_drgbs = torch::zeros_like(rgbs);
+        torch::Tensor subdiv_p_bw = torch::zeros({0, 1}, rgbs.options());
+        return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw, rbf_grads);
     }
 
     torch::Tensor dL_dvox = torch::zeros({P, geos.size(1)+3+1}, vox_centers.options());
@@ -738,6 +769,8 @@ rasterize_voxels_backward(
         vox_lengths.contiguous().data_ptr<float>(),
         geos.contiguous().data_ptr<float>(),
         (float3*)(rgbs.contiguous().data_ptr<float>()),
+        rbf,
+        rbf_grad,
 
         out_T.contiguous().data_ptr<float>(),
         imgState.tile_last,
@@ -765,7 +798,7 @@ rasterize_voxels_backward(
     torch::Tensor dL_drgbs = gradient_lst[1].contiguous();
     torch::Tensor subdiv_p_bw = gradient_lst[2].contiguous();
 
-    return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw);
+    return std::make_tuple(dL_dgeos, dL_drgbs, subdiv_p_bw, rbf_grads);
 }
 
 }
